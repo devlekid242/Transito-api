@@ -1,0 +1,16 @@
+api_platform:
+    title: Hello From Tronsito API Platform
+    version: 1.0.0
+    defaults:
+        stateless: true
+        cache_headers:
+            vary: ['Content-Type', 'Authorization', 'Origin']
+
+    # Force l'API à ne parler qu'en JSON pour l'application mobile
+    formats:
+        jsonld: ['application/ld+json']
+        json:   ['application/json']
+    
+    docs_formats:
+        jsonld: ['application/ld+json']
+        json:   ['application/json']

@@ -8,6 +8,9 @@ framework:
     #esi: true
     #fragments: true
 
+    property_access:
+        enabled: true
+
 when@test:
     framework:
         test: true
