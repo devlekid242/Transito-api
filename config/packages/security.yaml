@@ -1,0 +1,56 @@
+security:
+    # 1. Gestion du hachage des mots de passe voyageurs
+    password_hashers:
+        Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
+
+    # 2. Définition du fournisseur d'utilisateurs (connexion par Téléphone)
+    providers:
+        app_user_provider:
+            entity:
+                class: App\Entity\User
+                property: phoneNumber # L'identifiant principal de ton app (+242...)
+        # used to reload user from session & other features (e.g. switch_user)
+
+    firewalls:
+        dev:
+            pattern: ^/(_(profiler|wdt)|css|images|js)/
+            security: false
+
+        # 3. La route magique pour valider les identifiants et générer le JWT
+        login:
+            pattern: ^/api/login_check
+            stateless: true
+            json_login:
+                check_path: /api/login_check
+                username_path: phoneNumber
+                password_path: password
+                success_handler: lexik_jwt_authentication.handler.authentication_success
+                failure_handler: lexik_jwt_authentication.handler.authentication_failure
+
+        # 4. Protection par défaut de toutes les autres routes de l'API
+        api:
+            pattern: ^/api
+            stateless: true
+            jwt: ~
+
+    # 5. Contrôle des accès (Qui a le droit d'aller où)
+    access_control:
+        - { path: ^/api/login_check, roles: PUBLIC_ACCESS }
+        - { path: ^/api/register, roles: PUBLIC_ACCESS } # L'inscription doit être publique
+        - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/refresh, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/request-reset, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/verify-reset, roles: PUBLIC_ACCESS }
+        - { path: ^/api$|^\/api\/docs, roles: PUBLIC_ACCESS }
+        - { path: ^/api/contexts, roles: PUBLIC_ACCESS }
+        - { path: ^/api, roles: IS_AUTHENTICATED_FULLY }  # Tout le reste nécessite le Token JWT
+when@test:
+    security:
+        password_hashers:
+            # Password hashers are resource-intensive by design to ensure security.
+            # In tests, it's safe to reduce their cost to improve performance.
+            Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface:
+                algorithm: auto
+                cost: 4 # Lowest possible value for bcrypt
+                time_cost: 3 # Lowest possible value for argon
+                memory_cost: 10 # Lowest possible value for argon

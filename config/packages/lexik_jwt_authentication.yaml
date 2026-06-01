@@ -1,0 +1,6 @@
+# JWT : HS256 + secret brut (pas de fichiers PEM). Évite les erreurs d’encodage si les .pem sont absents
+# (ex. Windows / clés non générées). Pour la prod avec RSA, repassez à RS256 + chemins PEM + pass_phrase.
+lexik_jwt_authentication:
+    secret_key: '%env(JWT_SECRET_KEY)%'
+    encoder:
+        signature_algorithm: HS256

@@ -1,0 +1,17 @@
+api_platform:
+    title: Hello From Tronsito API Platform
+    version: 1.0.0
+    defaults:
+        stateless: true
+        cache_headers:
+            vary: ['Content-Type', 'Authorization', 'Origin']
+
+    # Formats entrants / sortants (mobile envoie application/json ; JSON-LD reste disponible pour la doc/outils).
+    formats:
+        jsonld: ['application/ld+json']
+        json: ['application/json']
+
+    docs_formats:
+        html: ['text/html']
+        jsonld: ['application/ld+json']
+        json: ['application/json']
