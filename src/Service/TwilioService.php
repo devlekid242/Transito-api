@@ -10,15 +10,17 @@ class TwilioService
     private string $authToken;
     private string $whatsappFrom;
     private ?\Psr\Log\LoggerInterface $logger;
-
+    private const DEFAULT_SANDBOX_FROM = 'whatsapp:+14155238886';
+    private const DEFAULT_SANDBOX_AUTH_TOKEN = '0e5d425276828894f85646efbeb7d87f';
+    private const DEFAULT_SANDBOX_ACCOUNT_SID = 'AC34f537a4fed885e65182c9b1c0617927';
 
     public function __construct(?LoggerInterface $logger = null)
     {
-        $this->accountSid = getenv('TWILIO_ACCOUNT_SID') ;
-        $this->authToken = getenv('TWILIO_AUTH_TOKEN') ;
+        $this->accountSid = getenv('TWILIO_ACCOUNT_SID') ?: self::DEFAULT_SANDBOX_ACCOUNT_SID;
+        $this->authToken = getenv('TWILIO_AUTH_TOKEN') ?: self::DEFAULT_SANDBOX_AUTH_TOKEN;
         // En version gratuite Twilio, le numéro expéditeur doit être le sandbox WhatsApp de Twilio.
         // En production, on peut remplacer cette valeur par un vrai numéro WhatsApp approuvé.
-        $this->whatsappFrom = getenv('TWILIO_WHATSAPP_FROM');
+        $this->whatsappFrom = getenv('TWILIO_WHATSAPP_FROM') ?: self::DEFAULT_SANDBOX_FROM;
         $this->logger = $logger;
     }
 

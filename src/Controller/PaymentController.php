@@ -9,15 +9,17 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\Routing\Attribute\Route;
 
 class PaymentController extends AbstractController
 {
+
     public function __construct(private EntityManagerInterface $em) {}
 
-    #[Route('/api/payments/initiate', name: 'payments_initiate', methods: ['POST'])]
+
     public function initiate(Request $request): JsonResponse
     {
+
+
         $data = json_decode($request->getContent(), true) ?? [];
         $reservationId = $data['reservationId'] ?? $data['reservation_id'] ?? null;
         $amount = $data['amount'] ?? null;
@@ -50,9 +52,9 @@ class PaymentController extends AbstractController
         ], 201);
     }
 
-    #[Route('/api/payments/confirm', name: 'payments_confirm', methods: ['POST'])]
     public function confirm(Request $request): JsonResponse
     {
+
         $data = json_decode($request->getContent(), true) ?? [];
         $tx = $data['transaction_id'] ?? $data['transactionId'] ?? null;
         if (!$tx) return new JsonResponse(['error' => 'transaction_id is required'], 400);
@@ -84,8 +86,8 @@ class PaymentController extends AbstractController
         ], 200);
     }
 
-    #[Route('/api/payments/history', name: 'payments_history', methods: ['GET'])]
     public function history(): JsonResponse
+
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -115,8 +117,19 @@ class PaymentController extends AbstractController
         return new JsonResponse($out, 200);
     }
 
-    #[Route('/api/payments/{id}', name: 'payments_detail', methods: ['GET'])]
+    public function methods(): JsonResponse
+
+    {
+        $methods = [
+            ['id' => 'MTN_MOMO', 'name' => 'MTN Mobile Money'],
+            ['id' => 'AIRTEL_MONEY', 'name' => 'Airtel Money'],
+            ['id' => 'CARD', 'name' => 'Card (Visa/Mastercard)'],
+        ];
+        return new JsonResponse($methods, 200);
+    }
+
     public function detail(int $id): JsonResponse
+
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
@@ -133,8 +146,8 @@ class PaymentController extends AbstractController
         ], 200);
     }
 
-    #[Route('/api/payments/{id}/refund', name: 'payments_refund', methods: ['POST'])]
     public function refund(int $id, Request $request): JsonResponse
+
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
@@ -159,19 +172,10 @@ class PaymentController extends AbstractController
         return new JsonResponse(['success' => true], 200);
     }
 
-    #[Route('/api/payments/methods', name: 'payments_methods', methods: ['GET'])]
-    public function methods(): JsonResponse
-    {
-        $methods = [
-            ['id' => 'MTN_MOMO', 'name' => 'MTN Mobile Money'],
-            ['id' => 'AIRTEL_MONEY', 'name' => 'Airtel Money'],
-            ['id' => 'CARD', 'name' => 'Card (Visa/Mastercard)'],
-        ];
-        return new JsonResponse($methods, 200);
-    }
+    
 
-    #[Route('/api/payments/validate-card', name: 'payments_validate_card', methods: ['POST'])]
     public function validateCard(Request $request): JsonResponse
+
     {
         $data = json_decode($request->getContent(), true) ?? [];
         $number = preg_replace('/\s+/', '', ($data['card_number'] ?? ''));
@@ -186,8 +190,8 @@ class PaymentController extends AbstractController
         return new JsonResponse(['valid' => $isValid], 200);
     }
 
-    #[Route('/api/payments/transaction/{transactionId}', name: 'payments_transaction_status', methods: ['GET'])]
     public function transactionStatus(string $transactionId): JsonResponse
+
     {
         $log = $this->em->getRepository(PaymentLog::class)->findOneBy(['reference' => $transactionId]);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);

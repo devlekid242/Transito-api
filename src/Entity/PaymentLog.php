@@ -20,15 +20,45 @@ use Symfony\Component\Serializer\Attribute\Groups;
     operations: [
         new Get(),
         new GetCollection(),
+        new Get(
+            uriTemplate: '/payments/methods',
+            controller: PaymentController::class . '::methods',
+            name: 'api_payments_methods'
+        ),
         new Post(
             uriTemplate: '/payments/initiate',
-            controller: PaymentController::class . '::initiatePayment',
+            controller: PaymentController::class . '::initiate',
             name: 'api_payments_initiate'
         ),
         new Post(
-            uriTemplate: '/payments/webhook',
-            controller: PaymentController::class . '::webhook',
-            name: 'api_payments_webhook'
+            uriTemplate: '/payments/confirm',
+            controller: PaymentController::class . '::confirm',
+            name: 'api_payments_confirm'
+        ),
+        new Get(
+            uriTemplate: '/payments/history',
+            controller: PaymentController::class . '::history',
+            name: 'api_payments_history'
+        ),
+        new Get(
+            uriTemplate: '/payments/{id}',
+            controller: PaymentController::class . '::detail',
+            name: 'api_payments_detail'
+        ),
+        new Post(
+            uriTemplate: '/payments/{id}/refund',
+            controller: PaymentController::class . '::refund',
+            name: 'api_payments_refund'
+        ),
+        new Post(
+            uriTemplate: '/payments/validate-card',
+            controller: PaymentController::class . '::validateCard',
+            name: 'api_payments_validate_card'
+        ),
+        new Get(
+            uriTemplate: '/payments/transaction/{transactionId}',
+            controller: PaymentController::class . '::transactionStatus',
+            name: 'api_payments_transaction_status'
         )
     ]
 )]

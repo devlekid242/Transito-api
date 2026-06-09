@@ -47,6 +47,12 @@ use Symfony\Component\Validator\Constraints as Assert;
             controller: UserController::class . '::changePassword',
             read: false,
             name: 'api_user_change_password'
+        ),
+        new Post(
+            uriTemplate: '/users/me/photo',
+            controller: UserController::class . '::updatePhoto',
+            read: false,
+            name: 'api_user_update_photo'
         )
     ]
 )]

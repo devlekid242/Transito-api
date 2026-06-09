@@ -19,10 +19,11 @@ use Symfony\Component\Validator\Constraints as Assert;
     normalizationContext: ['groups' => ['reservation:read']],
     denormalizationContext: ['groups' => ['reservation:write']],
     operations: [
+        new GetCollection(),
         new Get(
             uriTemplate: '/bookings/my-bookings',
             controller: BookingController::class . '::myBookings',
-            name: 'my_bookings'
+            name: 'api_my_bookings'
         ),
         new Get(
             uriTemplate: '/bookings/{id}',
@@ -30,7 +31,6 @@ use Symfony\Component\Validator\Constraints as Assert;
             read: false,
             name: 'api_booking_detail'
         ),
-        new GetCollection(),
         new Post(
             uriTemplate: '/bookings/create',
             controller: BookingController::class . '::create',
@@ -38,7 +38,7 @@ use Symfony\Component\Validator\Constraints as Assert;
         ),
         new GetCollection(
             uriTemplate: '/bookings/history',
-            controller: BookingController::class . '::history',
+            controller: BookingController::class . '::bookingHistory',
             name: 'api_bookings_history'
         )
     ]
