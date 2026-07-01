@@ -37,7 +37,13 @@ security:
     access_control:
         - { path: ^/api/login_check, roles: PUBLIC_ACCESS }
         - { path: ^/api/register, roles: PUBLIC_ACCESS } # L'inscription doit être publique
-        - { path: ^/api, roles: PUBLIC_ACCESS }  # Tout le reste nécessite le Token JWT
+        - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/refresh, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/request-reset, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/verify-reset, roles: PUBLIC_ACCESS }
+        - { path: ^/api$|^\/api\/docs, roles: PUBLIC_ACCESS }
+        - { path: ^/api/contexts, roles: PUBLIC_ACCESS }
+        - { path: ^/api, roles: IS_AUTHENTICATED_FULLY }  # Tout le reste nécessite le Token JWT
 when@test:
     security:
         password_hashers:

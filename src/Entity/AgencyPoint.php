@@ -3,17 +3,27 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\GetCollection;
+use App\Controller\AgencyPointController;
 use App\Repository\AgencyPointRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: AgencyPointRepository::class)]
 #[ORM\Table(name: '`agency_points`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['point:read']],
-    denormalizationContext: ['groups' => ['point:write']]
+    denormalizationContext: ['groups' => ['point:write']],
+    operations: [
+        new GetCollection(),
+        new GetCollection(
+            uriTemplate: '/agency-points/by-agency/{agencyId}',
+            controller: AgencyPointController::class . '::getByAgency',
+            name: 'api_agency_points_by_agency'
+        )
+    ]
 )]
 class AgencyPoint
 {

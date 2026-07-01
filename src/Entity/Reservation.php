@@ -3,17 +3,45 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Get;
+use App\Controller\BookingController;
 use App\Repository\ReservationRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: ReservationRepository::class)]
 #[ORM\Table(name: '`reservations`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['reservation:read']],
-    denormalizationContext: ['groups' => ['reservation:write']]
+    denormalizationContext: ['groups' => ['reservation:write']],
+    operations: [
+        new GetCollection(),
+        new Get(
+            uriTemplate: '/bookings/my-bookings',
+            controller: BookingController::class . '::myBookings',
+            name: 'api_my_bookings'
+        ),
+        new Get(
+            uriTemplate: '/bookings/{id}',
+            controller: BookingController::class . '::getBookingDetail',
+            read: false,
+            name: 'api_booking_detail'
+        ),
+        new Post(
+            uriTemplate: '/bookings/create',
+            controller: BookingController::class . '::create',
+            name: 'api_bookings_create'
+        ),
+        new GetCollection(
+            uriTemplate: '/bookings/history',
+            controller: BookingController::class . '::bookingHistory',
+            name: 'api_bookings_history'
+        )
+    ]
 )]
 class Reservation
 {

@@ -6,14 +6,30 @@ use ApiPlatform\Metadata\ApiResource;
 use App\Repository\TicketRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use App\Controller\TicketController;
 
 #[ORM\Entity(repositoryClass: TicketRepository::class)]
 #[ORM\Table(name: '`tickets`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['ticket:read']],
-    denormalizationContext: ['groups' => ['ticket:write']]
+    denormalizationContext: ['groups' => ['ticket:write']],
+    operations: [
+        new GetCollection(),
+        new GetCollection(
+            uriTemplate: '/tickets/available',
+            controller: TicketController::class . '::getAvailableTickets',
+            name: 'api_tickets_available'
+        ),
+        new Get(
+            uriTemplate: '/tickets/{id}/validate',
+            controller: TicketController::class . '::validateTicket',
+            name: 'api_tickets_validate'
+        )
+    ]
 )]
 class Ticket
 {

@@ -3,17 +3,26 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Post;
+use App\Controller\PromoController;
 use App\Repository\PromoCodeRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: PromoCodeRepository::class)]
 #[ORM\Table(name: '`promo_codes`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['promo:read']],
-    denormalizationContext: ['groups' => ['promo:write']]
+    denormalizationContext: ['groups' => ['promo:write']],
+    operations: [
+        new Post(
+            uriTemplate: '/promos/validate',
+            controller: PromoController::class . '::validatePromo',
+            name: 'api_promos_validate'
+        )
+    ]
 )]
 class PromoCode
 {

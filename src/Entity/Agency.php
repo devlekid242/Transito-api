@@ -11,8 +11,9 @@ use ApiPlatform\Metadata\Delete;
 use App\Repository\AgencyRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
+use App\Controller\AgencyController;
 
 #[ORM\Entity(repositoryClass: AgencyRepository::class)]
 #[ORM\Table(name: '`agencies`')]
@@ -24,7 +25,17 @@ use Symfony\Component\Validator\Constraints as Assert;
         new Get(),
         new Post(),          // Inscription d'une nouvelle agence via le back-office SuperAdmin
         new Put(),           // Mise à jour des infos par l'admin d'agence
-        new Delete()
+        new Delete(),
+        new GetCollection(
+            uriTemplate: '/agencies/active',
+            controller: AgencyController::class . '::getActiveAgencies',
+            name: 'api_agencies_active'
+        ),
+        new Post(
+            uriTemplate: '/agencies/register',
+            controller: AgencyController::class . '::registerAgency',
+            name: 'api_agencies_register'
+        )
     ]
 )]
 class Agency

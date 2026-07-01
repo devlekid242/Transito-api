@@ -3,17 +3,33 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Put;
+use App\Controller\NotificationController;
 use App\Repository\NotificationRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: NotificationRepository::class)]
 #[ORM\Table(name: '`notifications`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['notification:read']],
-    denormalizationContext: ['groups' => ['notification:write']]
+    denormalizationContext: ['groups' => ['notification:write']],
+    operations: [
+        new GetCollection(),
+        new GetCollection(
+            uriTemplate: '/notifications/unread',
+            controller: NotificationController::class . '::getUnreadNotifications',
+            name: 'api_notifications_unread'
+        ),
+        new Put(
+            uriTemplate: '/notifications/{id}/read',
+            controller: NotificationController::class . '::markAsRead',
+            name: 'api_notifications_mark_read'
+        )
+    ]
 )]
 class Notification
 {

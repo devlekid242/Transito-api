@@ -3,10 +3,14 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use App\Controller\PaymentController;
 use App\Repository\PaymentLogRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 
 #[ORM\Entity(repositoryClass: PaymentLogRepository::class)]
 #[ORM\Table(name: '`payment_logs`')]
@@ -14,8 +18,48 @@ use Symfony\Component\Serializer\Annotation\Groups;
     normalizationContext: ['groups' => ['payment:read']],
     // Généralement, on empêche l'écriture directe via l'API, ce sont nos webhooks internes qui créent les logs
     operations: [
-        new \ApiPlatform\Metadata\Get(),
-        new \ApiPlatform\Metadata\GetCollection()
+        new Get(),
+        new GetCollection(),
+        new Get(
+            uriTemplate: '/payments/methods',
+            controller: PaymentController::class . '::methods',
+            name: 'api_payments_methods'
+        ),
+        new Post(
+            uriTemplate: '/payments/initiate',
+            controller: PaymentController::class . '::initiate',
+            name: 'api_payments_initiate'
+        ),
+        new Post(
+            uriTemplate: '/payments/confirm',
+            controller: PaymentController::class . '::confirm',
+            name: 'api_payments_confirm'
+        ),
+        new Get(
+            uriTemplate: '/payments/history',
+            controller: PaymentController::class . '::history',
+            name: 'api_payments_history'
+        ),
+        new Get(
+            uriTemplate: '/payments/{id}',
+            controller: PaymentController::class . '::detail',
+            name: 'api_payments_detail'
+        ),
+        new Post(
+            uriTemplate: '/payments/{id}/refund',
+            controller: PaymentController::class . '::refund',
+            name: 'api_payments_refund'
+        ),
+        new Post(
+            uriTemplate: '/payments/validate-card',
+            controller: PaymentController::class . '::validateCard',
+            name: 'api_payments_validate_card'
+        ),
+        new Get(
+            uriTemplate: '/payments/transaction/{transactionId}',
+            controller: PaymentController::class . '::transactionStatus',
+            name: 'api_payments_transaction_status'
+        )
     ]
 )]
 class PaymentLog

@@ -3,25 +3,56 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Put;
+use ApiPlatform\Metadata\Patch;
+use App\Controller\UserController;
 use App\Repository\UserRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface;
 use Symfony\Component\Security\Core\User\UserInterface;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
+
 
 #[ORM\Entity(repositoryClass: UserRepository::class)]
 #[ORM\Table(name: '`users`')]
 #[ORM\UniqueConstraint(name: 'UNIQ_IDENTIFIER_PHONE_NUMBER', fields: ['phoneNumber'])]
 #[ApiResource(
     operations: [
-        // Endpoint d'inscription ouvert au public
+        new GetCollection(),
+        new Get(
+            uriTemplate: '/users/me',
+            controller: UserController::class . '::currentUser',
+            read: false,
+            name: 'api_user_current'
+        ),
+        new Put(
+            uriTemplate: '/users/me',
+            controller: UserController::class . '::update',
+            read: false,
+            name: 'api_user_update_put'
+        ),
+        new Patch(
+            uriTemplate: '/users/me',
+            controller: UserController::class . '::update',
+            read: false,
+            name: 'api_user_update_patch'
+        ),
+        new Put(
+            uriTemplate: '/users/me/change-password',
+            controller: UserController::class . '::changePassword',
+            read: false,
+            name: 'api_user_change_password'
+        ),
         new Post(
-            uriTemplate: '/register',
-            processor: \App\State\UserPasswordProcessor::class,
-            denormalizationContext: ['groups' => ['user:write']]
+            uriTemplate: '/users/me/photo',
+            controller: UserController::class . '::updatePhoto',
+            read: false,
+            name: 'api_user_update_photo'
         )
     ]
 )]
@@ -72,6 +103,15 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
 
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     private ?\DateTimeInterface $createdAt = null;
+
+    #[ORM\Column(name: 'password_reset_code', length: 10, nullable: true)]
+    private ?string $passwordResetCode = null;
+
+    #[ORM\Column(name: 'password_reset_expires_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $passwordResetExpiresAt = null;
+
+    #[ORM\Column(name: 'profile_photo_url', length: 500, nullable: true)]
+    private ?string $profilePhotoUrl = null;
 
     public function __construct()
     {
@@ -214,5 +254,38 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function getPasswordResetCode(): ?string
+    {
+        return $this->passwordResetCode;
+    }
+
+    public function setPasswordResetCode(?string $code): static
+    {
+        $this->passwordResetCode = $code;
+        return $this;
+    }
+
+    public function getPasswordResetExpiresAt(): ?\DateTimeInterface
+    {
+        return $this->passwordResetExpiresAt;
+    }
+
+    public function setPasswordResetExpiresAt(?\DateTimeInterface $expiresAt): static
+    {
+        $this->passwordResetExpiresAt = $expiresAt;
+        return $this;
+    }
+
+    public function getProfilePhotoUrl(): ?string
+    {
+        return $this->profilePhotoUrl;
+    }
+
+    public function setProfilePhotoUrl(?string $profilePhotoUrl): static
+    {
+        $this->profilePhotoUrl = $profilePhotoUrl;
+        return $this;
     }
 }

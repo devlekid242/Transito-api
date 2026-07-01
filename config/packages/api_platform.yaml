@@ -6,11 +6,12 @@ api_platform:
         cache_headers:
             vary: ['Content-Type', 'Authorization', 'Origin']
 
-    # Force l'API à ne parler qu'en JSON pour l'application mobile
+    # Formats entrants / sortants (mobile envoie application/json ; JSON-LD reste disponible pour la doc/outils).
     formats:
         jsonld: ['application/ld+json']
-        json:   ['application/json']
-    
+        json: ['application/json']
+
     docs_formats:
+        html: ['text/html']
         jsonld: ['application/ld+json']
-        json:   ['application/json']
+        json: ['application/json']

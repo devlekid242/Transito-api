@@ -7,10 +7,11 @@ use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\Put;
+use App\Controller\TripController;
 use App\Repository\TripRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
-use Symfony\Component\Serializer\Annotation\Groups;
+use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: TripRepository::class)]
@@ -19,10 +20,36 @@ use Symfony\Component\Validator\Constraints as Assert;
     normalizationContext: ['groups' => ['trip:read']],
     denormalizationContext: ['groups' => ['trip:write']],
     operations: [
-        new GetCollection(), // Alimentera l'infinite scroll de la page d'accueil d'Ionic
-        new Get(),
-        new Post(),
-        new Put()
+        new GetCollection(
+            uriTemplate: '/trips',
+            controller: TripController::class . '::index',
+            read: false,
+            name: 'api_trips_search'
+        ),
+        new GetCollection(
+            uriTemplate: '/trips/popular',
+            controller: TripController::class . '::popular',
+            read: false,
+            name: 'api_trip_popular'
+        ),
+        new Get(
+            uriTemplate: '/trips/{id}',
+            controller: TripController::class . '::detail',
+            read: false,
+            name: 'api_trip_detail'
+        ),
+        new GetCollection(
+            uriTemplate: '/trips/cities/departure',
+            controller: TripController::class . '::departureCities',
+            read: false,
+            name: 'api_trip_departure_cities'
+        ),
+        new GetCollection(
+            uriTemplate: '/trips/cities/arrival',
+            controller: TripController::class . '::arrivalCities',
+            read: false,
+            name: 'api_trip_arrival_cities'
+        )
     ]
 )]
 class Trip
