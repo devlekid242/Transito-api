@@ -36,7 +36,7 @@ security:
     # 5. Contrôle des accès (Qui a le droit d'aller où)
     access_control:
         - { path: ^/api/login_check, roles: PUBLIC_ACCESS }
-        - { path: ^/api/register, roles: PUBLIC_ACCESS } # L'inscription doit être publique
+        - { path: ^/api/auth/register, roles: PUBLIC_ACCESS } # L'inscription doit être publique
         - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/refresh, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/request-reset, roles: PUBLIC_ACCESS }

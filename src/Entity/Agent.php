@@ -20,8 +20,14 @@ class Agent
     #[ORM\Id]
     #[ORM\GeneratedValue]
     #[ORM\Column]
-    #[Groups(['agent:read'])]
+    #[Groups(['agent:read', 'agent:write'])]
     private ?int $id = null;
+
+    #[ORM\OneToOne(targetEntity: User::class, cascade: ['persist'])]
+    #[ORM\JoinColumn(name: 'user_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE', unique: true)]
+    #[Assert\NotNull(message: "Un utilisateur est obligatoire.")]
+    #[Groups(['agent:read', 'agent:write'])]
+    private ?User $user = null;
 
     #[ORM\ManyToOne(targetEntity: Agency::class)]
     #[ORM\JoinColumn(name: 'agency_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
@@ -29,44 +35,27 @@ class Agent
     #[Groups(['agent:read', 'agent:write'])]
     private ?Agency $agency = null;
 
-    #[ORM\Column(length: 100)]
-    #[Assert\NotBlank(message: "Le nom de l'agent est obligatoire.")]
-    #[Groups(['agent:read', 'agent:write'])]
-    private ?string $name = null;
-
-    #[ORM\Column(length: 100, unique: true)]
-    #[Assert\NotBlank(message: "L'adresse email est obligatoire.")]
-    #[Assert\Email(message: "L'adresse email n'est pas valide.")]
-    #[Groups(['agent:read', 'agent:write'])]
-    private ?string $email = null;
-
-    #[ORM\Column(length: 20)]
-    #[Assert\NotBlank(message: "Le numéro de téléphone est obligatoire.")]
-    #[Groups(['agent:read', 'agent:write'])]
-    private ?string $phone = null;
-
-    #[ORM\Column(name: 'password_hash', length: 255)]
-    #[Assert\NotBlank(message: "Le mot de passe est obligatoire.")]
-    #[Groups(['agent:write'])]
-    private ?string $passwordHash = null;
-
     #[ORM\Column(length: 50, options: ['default' => 'agent_quai'])]
     #[Assert\Choice(choices: ['admin_agence', 'agent_quai'], message: "Le rôle de l'agent est invalide.")]
     #[Groups(['agent:read', 'agent:write'])]
-    private string $role = 'agent_quai';
+    private string $agentRole = 'agent_quai';
 
     #[ORM\Column(length: 20, options: ['default' => 'active'])]
     #[Assert\Choice(choices: ['active', 'inactive'], message: "Le statut de l'agent est invalide.")]
     #[Groups(['agent:read', 'agent:write'])]
     private string $status = 'active';
 
-    #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
-    #[Groups(['agent:read'])]
-    private ?\DateTimeInterface $createdAt = null;
+    public function __construct() {}
 
-    public function __construct()
+    public function getUser(): ?User
     {
-        $this->createdAt = new \DateTime();
+        return $this->user;
+    }
+
+    public function setUser(?User $user): static
+    {
+        $this->user = $user;
+        return $this;
     }
 
     public function getId(): ?int
@@ -85,58 +74,14 @@ class Agent
         return $this;
     }
 
-    public function getName(): ?string
+    public function getAgentRole(): string
     {
-        return $this->name;
+        return $this->agentRole;
     }
 
-    public function setName(string $name): static
+    public function setAgentRole(string $agentRole): static
     {
-        $this->name = $name;
-        return $this;
-    }
-
-    public function getEmail(): ?string
-    {
-        return $this->email;
-    }
-
-    public function setEmail(string $email): static
-    {
-        $this->email = $email;
-        return $this;
-    }
-
-    public function getPhone(): ?string
-    {
-        return $this->phone;
-    }
-
-    public function setPhone(string $phone): static
-    {
-        $this->phone = $phone;
-        return $this;
-    }
-
-    public function getPasswordHash(): ?string
-    {
-        return $this->passwordHash;
-    }
-
-    public function setPasswordHash(string $passwordHash): static
-    {
-        $this->passwordHash = $passwordHash;
-        return $this;
-    }
-
-    public function getRole(): string
-    {
-        return $this->role;
-    }
-
-    public function setRole(string $role): static
-    {
-        $this->role = $role;
+        $this->agentRole = $agentRole;
         return $this;
     }
 
@@ -149,10 +94,5 @@ class Agent
     {
         $this->status = $status;
         return $this;
-    }
-
-    public function getCreatedAt(): ?\DateTimeInterface
-    {
-        return $this->createdAt;
     }
 }

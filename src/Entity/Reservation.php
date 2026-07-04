@@ -7,7 +7,10 @@ use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\Get;
 use App\Controller\BookingController;
+use App\Entity\Ticket;
 use App\Repository\ReservationRepository;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
@@ -91,8 +94,12 @@ class Reservation
     #[Groups(['reservation:read'])]
     private ?\DateTimeInterface $createdAt = null;
 
+    #[ORM\OneToMany(targetEntity: \App\Entity\Ticket::class, mappedBy: 'reservation', cascade: ['persist', 'remove'], orphanRemoval: true)]
+    private Collection $tickets;
+
     public function __construct()
     {
+        $this->tickets = new ArrayCollection();
         $this->createdAt = new \DateTime();
     }
 
@@ -181,5 +188,10 @@ class Reservation
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function getTickets(): Collection
+    {
+        return $this->tickets;
     }
 }

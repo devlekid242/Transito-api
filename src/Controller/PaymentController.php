@@ -2,18 +2,22 @@
 
 namespace App\Controller;
 
+use App\Entity\Notification;
 use App\Entity\PaymentLog;
 use App\Entity\Reservation;
 use App\Entity\User;
+use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Attribute\Route;
 
 class PaymentController extends AbstractController
 {
 
-    public function __construct(private EntityManagerInterface $em) {}
+    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
 
     public function initiate(Request $request): JsonResponse
@@ -75,8 +79,22 @@ class PaymentController extends AbstractController
             $this->em->persist($reservation);
         }
 
+        if ($reservation?->getUser()) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($reservation->getUser()->getId())
+                ->setTitle('Paiement confirmé')
+                ->setContent(sprintf('Votre paiement pour la réservation #%d a été confirmé.', $reservation->getId()))
+                ->setCategory('PAYMENT');
+            $this->em->persist($notification);
+        }
+
         $this->em->persist($log);
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
 
         return new JsonResponse([
             'success' => true,
@@ -102,7 +120,7 @@ class PaymentController extends AbstractController
             ->orderBy('p.createdAt', 'DESC');
 
         $logs = $qb->getQuery()->getResult();
-        $out = array_map(function($l) {
+        $out = array_map(function ($l) {
             return [
                 'id' => $l->getId(),
                 'reservationId' => $l->getReservation()?->getId(),
@@ -166,13 +184,27 @@ class PaymentController extends AbstractController
             $this->em->persist($reservation);
         }
 
+        if ($reservation?->getUser()) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($reservation->getUser()->getId())
+                ->setTitle('Remboursement effectué')
+                ->setContent(sprintf('Le remboursement de votre réservation #%d a été traité.', $reservation->getId()))
+                ->setCategory('PAYMENT');
+            $this->em->persist($notification);
+        }
+
         $this->em->persist($log);
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
 
         return new JsonResponse(['success' => true], 200);
     }
 
-    
+
 
     public function validateCard(Request $request): JsonResponse
 
@@ -211,5 +243,22 @@ class PaymentController extends AbstractController
             $sum += $n;
         }
         return $sum % 10 === 0;
+    }
+
+    #[Route('/api/payments/{id}/receipt', name: 'payment_receipt', methods: ['GET'])]
+    public function paymentReceipt(int $id): Response
+    {
+        $log = $this->em->getRepository(PaymentLog::class)->find($id);
+        if (!$log) return new Response('Not found', 404);
+
+        $content = "Payment Receipt #{$log->getId()}\n";
+        $content .= "Reservation: " . ($log->getReservation()?->getId() ?? 'N/A') . "\n";
+        $content .= "Amount: " . $log->getAmount() . "\n";
+        $content .= "Status: " . $log->getStatus() . "\n";
+
+        return new Response($content, 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => sprintf('attachment; filename="receipt_payment_%d.pdf"', $log->getId()),
+        ]);
     }
 }

@@ -58,6 +58,15 @@ class Notification
     #[Groups(['notification:read', 'notification:write'])]
     private ?string $content = null;
 
+    #[ORM\Column(length: 50, options: ['default' => 'INFO'])]
+    #[Assert\NotBlank(message: "La catégorie de notification est obligatoire.")]
+    #[Groups(['notification:read', 'notification:write'])]
+    private ?string $category = 'INFO';
+
+    #[ORM\Column(type: Types::JSON, nullable: true)]
+    #[Groups(['notification:read', 'notification:write'])]
+    private ?array $payload = null;
+
     #[ORM\Column(name: 'is_read', type: Types::SMALLINT, options: ['default' => 0])]
     #[Groups(['notification:read', 'notification:write'])]
     private int $isRead = 0;
@@ -117,6 +126,28 @@ class Notification
     public function setContent(string $content): static
     {
         $this->content = $content;
+        return $this;
+    }
+
+    public function getCategory(): ?string
+    {
+        return $this->category;
+    }
+
+    public function setCategory(string $category): static
+    {
+        $this->category = $category;
+        return $this;
+    }
+
+    public function getPayload(): ?array
+    {
+        return $this->payload;
+    }
+
+    public function setPayload(?array $payload): static
+    {
+        $this->payload = $payload;
         return $this;
     }
 

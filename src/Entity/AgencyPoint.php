@@ -5,6 +5,7 @@ namespace App\Entity;
 use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\GetCollection;
 use App\Controller\AgencyPointController;
+use App\Entity\Agency;
 use App\Repository\AgencyPointRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
@@ -45,17 +46,49 @@ class AgencyPoint
     private ?string $city = null;
 
     #[ORM\Column(length: 150)]
-    #[Assert\NotBlank(message: "Le nom de la gare d'embarquement est obligatoire.")]
+    #[Assert\NotBlank(message: "Le nom du point est obligatoire.")]
     #[Groups(['point:read', 'point:write', 'trip:read'])]
     private ?string $name = null;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    #[Groups(['point:read', 'point:write'])]
+    private ?string $address = null;
+
+    #[ORM\Column(length: 100, nullable: true)]
+    #[Groups(['point:read', 'point:write'])]
+    private ?string $quartier = null;
 
     #[ORM\Column(length: 20, nullable: true)]
     #[Groups(['point:read', 'point:write'])]
     private ?string $phone = null;
 
+    #[ORM\Column(type: Types::FLOAT, nullable: true)]
+    #[Groups(['point:read', 'point:write'])]
+    private ?float $latitude = null;
+
+    #[ORM\Column(type: Types::FLOAT, nullable: true)]
+    #[Groups(['point:read', 'point:write'])]
+    private ?float $longitude = null;
+
+    #[ORM\Column(length: 40, options: ['default' => 'principal'])]
+    #[Groups(['point:read', 'point:write'])]
+    private string $pointType = 'principal';
+
+    #[ORM\Column(length: 20, options: ['default' => 'active'])]
+    #[Groups(['point:read', 'point:write'])]
+    private string $status = 'active';
+
+    #[ORM\Column(name: 'is_active', type: Types::SMALLINT, options: ['default' => 1])]
+    #[Groups(['point:read', 'point:write'])]
+    private int $isActive = 1;
+
     #[ORM\Column(name: 'has_vip_lounge', type: Types::SMALLINT, options: ['default' => 0])]
     #[Groups(['point:read', 'point:write'])]
     private int $hasVipLounge = 0;
+
+    // #[ORM\Column(name: 'has_vip_lounge', type: Types::SMALLINT, options: ['default' => 0])]
+    // #[Groups(['point:read', 'point:write'])]
+    // private int $hasVipLounge = 0;
 
     #[ORM\Column(name: 'has_wifi', type: Types::SMALLINT, options: ['default' => 0])]
     #[Groups(['point:read', 'point:write'])]
@@ -125,6 +158,88 @@ class AgencyPoint
     {
         $this->phone = $phone;
         return $this;
+    }
+
+    public function getAddress(): ?string
+    {
+        return $this->address;
+    }
+
+    public function setAddress(?string $address): static
+    {
+        $this->address = $address;
+        return $this;
+    }
+
+    public function getQuartier(): ?string
+    {
+        return $this->quartier;
+    }
+
+    public function setQuartier(?string $quartier): static
+    {
+        $this->quartier = $quartier;
+        return $this;
+    }
+
+    public function getLatitude(): ?float
+    {
+        return $this->latitude;
+    }
+
+    public function setLatitude(?float $latitude): static
+    {
+        $this->latitude = $latitude;
+        return $this;
+    }
+
+    public function getLongitude(): ?float
+    {
+        return $this->longitude;
+    }
+
+    public function setLongitude(?float $longitude): static
+    {
+        $this->longitude = $longitude;
+        return $this;
+    }
+
+    public function getPointType(): string
+    {
+        return $this->pointType;
+    }
+
+    public function setPointType(string $pointType): static
+    {
+        $this->pointType = $pointType;
+        return $this;
+    }
+
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+
+    public function setStatus(string $status): static
+    {
+        $this->status = $status;
+        return $this;
+    }
+
+    public function getIsActive(): int
+    {
+        return $this->isActive;
+    }
+
+    public function setIsActive(int $isActive): static
+    {
+        $this->isActive = $isActive;
+        return $this;
+    }
+
+    public function isActive(): bool
+    {
+        return $this->isActive === 1;
     }
 
     public function getHasVipLounge(): int

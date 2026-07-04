@@ -2,20 +2,23 @@
 
 namespace App\Controller;
 
-use App\Entity\Reservation;
-use App\Entity\Trip;
-use App\Entity\Ticket;
 use App\Entity\Baggage;
+use App\Entity\Notification;
+use App\Entity\Reservation;
+use App\Entity\Ticket;
+use App\Entity\Trip;
 use App\Entity\User;
+use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\HttpFoundation\Response;
 
 class BookingController extends AbstractController
 {
-    public function __construct(private EntityManagerInterface $em) {}
+    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
     public function create(Request $request): JsonResponse
@@ -42,7 +45,9 @@ class BookingController extends AbstractController
 
         $reservation = new Reservation();
         $user = $this->getUser();
-        if ($user) $reservation->setUser($user);
+        if ($user instanceof User) {
+            $reservation->setUser($user);
+        }
         $reservation->setTrip($trip);
         $reservation->setTotalAmount((string)$totalPrice);
 
@@ -96,7 +101,21 @@ class BookingController extends AbstractController
             $this->em->persist($bg);
         }
 
+        if ($user instanceof User) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($user->getId())
+                ->setTitle('Réservation confirmée')
+                ->setContent(sprintf('Votre réservation pour le trajet %s → %s a été enregistrée.', $trip->getDepartureCity(), $trip->getArrivalCity()))
+                ->setCategory('BOOKING');
+            $this->em->persist($notification);
+        }
+
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
 
         $response = [
             'id' => $reservation->getId(),
@@ -108,6 +127,26 @@ class BookingController extends AbstractController
         ];
 
         return new JsonResponse($response, 201);
+    }
+
+    #[Route('/api/bookings/{id}/receipt', name: 'booking_receipt', methods: ['GET'])]
+    public function bookingReceipt(int $id): Response
+    {
+        $reservation = $this->em->getRepository(Reservation::class)->find($id);
+        if (!$reservation) {
+            return new Response('Not found', 404);
+        }
+
+        // Minimal PDF-like placeholder content (simple text as PDF placeholder)
+        $content = "Receipt for reservation #{$reservation->getId()}\n";
+        $content .= "Passenger: " . ($this->em->getRepository(Ticket::class)->findOneBy(['reservation' => $reservation])?->getPassengerName() ?? 'N/A') . "\n";
+        $content .= "Amount: " . $reservation->getTotalAmount() . "\n";
+        $content .= "Trip ID: " . ($reservation->getTrip()?->getId() ?? 'N/A') . "\n";
+
+        return new Response($content, 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => sprintf('attachment; filename="receipt_reservation_%d.pdf"', $reservation->getId()),
+        ]);
     }
 
     #[Route('/api/bookings/{id}', name: 'booking_detail', methods: ['GET'])]
@@ -271,8 +310,8 @@ class BookingController extends AbstractController
             'bookingDate' => $departureTime ? $departureTime->format('c') : $reservation->getCreatedAt()?->format('c'),
             'trip' => $trip ? [
                 'id' => $trip->getId(),
-                'departureCity' => $trip->getDeparturePoint()?->getCity() ?? '',
-                'arrivalCity' => $trip->getArrivalPoint()?->getCity() ?? '',
+                'departureCity' => $trip->getDepartureCity() ?? $trip->getDeparturePoint()?->getCity() ?? '',
+                'arrivalCity' => $trip->getArrivalCity() ?? $trip->getArrivalPoint()?->getCity() ?? '',
                 'departureTime' => $departureTime ? $departureTime->format('c') : null,
                 'arrivalTime' => ($trip->getEstimatedArrivalTime()?->format('c')) ?: null,
                 'departureDate' => $departureDate,

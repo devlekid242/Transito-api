@@ -3,11 +3,16 @@
 namespace App\Controller;
 
 use App\Entity\Agency;
+use App\Entity\User;
 use App\Repository\AgencyPointRepository;
 use App\Repository\AgencyRepository;
+use App\Repository\AgentRepository;
 use App\Repository\TripRepository;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
 
@@ -46,6 +51,127 @@ class AgencyController extends AbstractController
         return $this->json(array_map([$this, 'normalizePoint'], $points));
     }
 
+    #[Route('/{agencyId}/admin', name: 'api_agency_update_admin', methods: ['PUT'])]
+    public function update(
+        int $agencyId,
+        Request $request,
+        AgencyRepository $agencyRepository,
+        AgentRepository $agentRepository,
+        EntityManagerInterface $em
+    ): JsonResponse {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $agencyRepository->find($agencyId);
+        if (!$agency) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $agent = $agentRepository->findOneBy(['user' => $user, 'agency' => $agency]);
+        if (!$agent || $agent->getAgentRole() !== 'admin_agence') {
+            return $this->json(['message' => 'Accès refusé. Vous devez être administrateur de cette agence.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (!is_array($data)) {
+            return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        if (array_key_exists('name', $data)) {
+            $agency->setName((string)$data['name']);
+        }
+        if (array_key_exists('registrationNumber', $data)) {
+            $agency->setRegistrationNumber($data['registrationNumber'] !== null ? (string)$data['registrationNumber'] : null);
+        }
+        if (array_key_exists('address', $data)) {
+            $agency->setAddress($data['address'] !== null ? (string)$data['address'] : null);
+        }
+        if (array_key_exists('bannerUrl', $data)) {
+            $agency->setBannerUrl($data['bannerUrl'] !== null ? (string)$data['bannerUrl'] : null);
+        }
+        if (array_key_exists('logoUrl', $data)) {
+            $agency->setLogoUrl($data['logoUrl'] !== null ? (string)$data['logoUrl'] : null);
+        }
+        if (array_key_exists('websiteUrl', $data)) {
+            $agency->setWebsiteUrl($data['websiteUrl'] !== null ? (string)$data['websiteUrl'] : null);
+        }
+        if (array_key_exists('mapUrl', $data)) {
+            $agency->setMapUrl($data['mapUrl'] !== null ? (string)$data['mapUrl'] : null);
+        }
+        if (array_key_exists('description', $data)) {
+            $agency->setDescription($data['description'] !== null ? (string)$data['description'] : null);
+        }
+        if (array_key_exists('phone', $data)) {
+            $agency->setPhone($data['phone'] !== null ? (string)$data['phone'] : null);
+        }
+        if (array_key_exists('email', $data)) {
+            $agency->setEmail($data['email'] !== null ? (string)$data['email'] : null);
+        }
+        if (array_key_exists('status', $data)) {
+            $agency->setStatus($data['status'] !== null ? (string)$data['status'] : $agency->getStatus());
+        }
+
+        $em->persist($agency);
+        $em->flush();
+
+        return $this->json($this->normalizeAgency($agency));
+    }
+
+    #[Route('/{agencyId}/upload-images', name: 'api_agency_upload_images', methods: ['POST'])]
+    public function uploadImages(
+        int $agencyId,
+        Request $request,
+        AgencyRepository $agencyRepository,
+        AgentRepository $agentRepository,
+        EntityManagerInterface $em
+    ): JsonResponse {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $agencyRepository->find($agencyId);
+        if (!$agency) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $agent = $agentRepository->findOneBy(['user' => $user, 'agency' => $agency]);
+        if (!$agent || $agent->getAgentRole() !== 'admin_agence') {
+            return $this->json(['message' => 'Accès refusé. Vous devez être administrateur de cette agence.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $bannerFile = $request->files->get('banner');
+        $logoFile = $request->files->get('logo');
+
+        if (!$bannerFile && !$logoFile) {
+            return $this->json(['message' => 'Aucun fichier fourni.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $uploadsDir = $this->getParameter('kernel.project_dir') . '/public/uploads/agency-images';
+        if (!is_dir($uploadsDir)) {
+            mkdir($uploadsDir, 0777, true);
+        }
+
+        if ($bannerFile instanceof UploadedFile) {
+            $bannerFilename = uniqid('agency_banner_' . $agency->getId() . '_') . '.' . $bannerFile->guessExtension();
+            $bannerFile->move($uploadsDir, $bannerFilename);
+            $agency->setBannerUrl('/uploads/agency-images/' . $bannerFilename);
+        }
+
+        if ($logoFile instanceof UploadedFile) {
+            $logoFilename = uniqid('agency_logo_' . $agency->getId() . '_') . '.' . $logoFile->guessExtension();
+            $logoFile->move($uploadsDir, $logoFilename);
+            $agency->setLogoUrl('/uploads/agency-images/' . $logoFilename);
+        }
+
+        $em->persist($agency);
+        $em->flush();
+
+        return $this->json($this->normalizeAgency($agency));
+    }
+
     private function normalizeTrip($trip): array
     {
         $capacity = $trip->getBus()?->getCapacity() ?? 0;
@@ -53,8 +179,8 @@ class AgencyController extends AbstractController
 
         return [
             'id' => $trip->getId(),
-            'departureCity' => $trip->getDeparturePoint()?->getCity() ?? $trip->getDeparturePoint()?->getAddress() ?? '',
-            'arrivalCity' => $trip->getArrivalPoint()?->getCity() ?? $trip->getArrivalPoint()?->getAddress() ?? '',
+            'departureCity' => $trip->getDepartureCity() ?? $trip->getDeparturePoint()?->getCity() ?? $trip->getDeparturePoint()?->getAddress() ?? '',
+            'arrivalCity' => $trip->getArrivalCity() ?? $trip->getArrivalPoint()?->getCity() ?? $trip->getArrivalPoint()?->getAddress() ?? '',
             'departureTime' => $trip->getDepartureTime()?->format(\DateTimeInterface::ATOM),
             'arrivalTime' => $trip->getEstimatedArrivalTime()?->format(\DateTimeInterface::ATOM),
             'departureDate' => $trip->getDepartureTime()?->format('Y-m-d'),
@@ -66,7 +192,7 @@ class AgencyController extends AbstractController
             'agencyName' => $trip->getAgency()?->getName(),
             'agencyLogo' => $trip->getAgency()?->getLogoUrl(),
             'busType' => $trip->getBus()?->getName() ?? null,
-            'boardingPoint' => $trip->getDeparturePoint()?->getAddress() ?? null,
+            'boardingPoint' => $trip->getBoardingPoints()[0]['name'] ?? $trip->getDeparturePoint()?->getAddress() ?? null,
             'createdAt' => $trip->getCreatedAt()?->format(\DateTimeInterface::ATOM),
             'updatedAt' => $trip->getCreatedAt()?->format(\DateTimeInterface::ATOM),
         ];
@@ -80,6 +206,26 @@ class AgencyController extends AbstractController
             'address' => $point->getAddress(),
             'phoneNumber' => $point->getPhoneNumber(),
             'isActive' => $point->isActive(),
+        ];
+    }
+
+    private function normalizeAgency(Agency $agency): array
+    {
+        return [
+            'id' => $agency->getId(),
+            'name' => $agency->getName(),
+            'registrationNumber' => $agency->getRegistrationNumber(),
+            'address' => $agency->getAddress(),
+            'bannerUrl' => $agency->getBannerUrl(),
+            'logoUrl' => $agency->getLogoUrl(),
+            'websiteUrl' => $agency->getWebsiteUrl(),
+            'mapUrl' => $agency->getMapUrl(),
+            'description' => $agency->getDescription(),
+            'phone' => $agency->getPhone(),
+            'email' => $agency->getEmail(),
+            'status' => $agency->getStatus(),
+            'ratingCache' => $agency->getRatingCache(),
+            'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
         ];
     }
 }

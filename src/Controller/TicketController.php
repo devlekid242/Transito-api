@@ -2,9 +2,11 @@
 
 namespace App\Controller;
 
-use App\Entity\Ticket;
 use App\Entity\Agent;
+use App\Entity\Notification;
+use App\Entity\Ticket;
 use Doctrine\ORM\EntityManagerInterface;
+use App\Service\NotificationBroadcastService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -12,7 +14,7 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class TicketController extends AbstractController
 {
-    public function __construct(private EntityManagerInterface $em) {}
+    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
     #[Route('/api/tickets/{id}/validate', name: 'validate_ticket', methods: ['PATCH'])]
     public function validate(int $id, Request $request): JsonResponse
@@ -28,7 +30,22 @@ class TicketController extends AbstractController
             $agent = $this->em->getRepository(Agent::class)->find($agentId);
             if ($agent) $ticket->setValidatedByAgent($agent);
         }
+
+        if ($ticket->getReservation()?->getUser()) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($ticket->getReservation()->getUser()->getId())
+                ->setTitle('Billet validé')
+                ->setContent(sprintf('Votre billet pour le trajet %s → %s a été validé.', $ticket->getReservation()->getTrip()?->getDepartureCity() ?? '', $ticket->getReservation()->getTrip()?->getArrivalCity() ?? ''))
+                ->setCategory('TICKET');
+            $this->em->persist($notification);
+        }
+
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
         return new JsonResponse(['ok' => true], 200);
     }
 
@@ -71,8 +88,8 @@ class TicketController extends AbstractController
             'ticketNumber' => 'TKT-' . $ticket->getId(),
             'passengerName' => $ticket->getPassengerName(),
             'tripNumber' => $trip ? 'TRIP-' . $trip->getId() : null,
-            'departureCity' => $trip?->getDeparturePoint()?->getCity() ?? '',
-            'arrivalCity' => $trip?->getArrivalPoint()?->getCity() ?? '',
+            'departureCity' => $trip?->getDepartureCity() ?? $trip?->getDeparturePoint()?->getCity() ?? '',
+            'arrivalCity' => $trip?->getArrivalCity() ?? $trip?->getArrivalPoint()?->getCity() ?? '',
             'departureTime' => $departureTime ? $departureTime->format('c') : null,
             'departureDate' => $departureTime ? $departureTime->format('Y-m-d') : null,
             'seatNumber' => (string)$ticket->getSeatNumber(),

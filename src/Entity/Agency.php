@@ -9,7 +9,10 @@ use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\Put;
 use ApiPlatform\Metadata\Delete;
 use App\Repository\AgencyRepository;
+use App\Entity\AgencyDocument;
 use Doctrine\DBAL\Types\Types;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
@@ -24,7 +27,6 @@ use App\Controller\AgencyController;
         new GetCollection(), // Pour l'infinite scroll de l'application mobile
         new Get(),
         new Post(),          // Inscription d'une nouvelle agence via le back-office SuperAdmin
-        new Put(),           // Mise à jour des infos par l'admin d'agence
         new Delete(),
         new GetCollection(
             uriTemplate: '/agencies/active',
@@ -54,6 +56,30 @@ class Agency
     #[ORM\Column(name: 'logo_url', length: 255, nullable: true)]
     #[Groups(['agency:read', 'agency:write'])]
     private ?string $logoUrl = null;
+
+    #[ORM\Column(length: 100, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $registrationNumber = null;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $address = null;
+
+    #[ORM\Column(name: 'banner_url', length: 500, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $bannerUrl = null;
+
+    #[ORM\Column(name: 'website_url', length: 255, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $websiteUrl = null;
+
+    #[ORM\Column(name: 'map_url', length: 500, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $mapUrl = null;
+
+    #[ORM\OneToMany(targetEntity: AgencyDocument::class, mappedBy: 'agency', cascade: ['persist', 'remove'], orphanRemoval: true)]
+    #[Groups(['agency:read'])]
+    private Collection $documents;
 
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     #[Groups(['agency:read', 'agency:write'])]
@@ -91,35 +117,177 @@ class Agency
     public function __construct()
     {
         $this->createdAt = new \DateTime();
+        $this->documents = new ArrayCollection();
     }
 
     // --- GETTERS ET SETTERS ---
 
-    public function getId(): ?int { return $this->id; }
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
 
-    public function getName(): ?string { return $this->name; }
-    public function setName(string $name): static { $this->name = $name; return $this; }
+    public function getName(): ?string
+    {
+        return $this->name;
+    }
+    public function setName(string $name): static
+    {
+        $this->name = $name;
+        return $this;
+    }
 
-    public function getLogoUrl(): ?string { return $this->logoUrl; }
-    public function setLogoUrl(?string $logoUrl): static { $this->logoUrl = $logoUrl; return $this; }
+    public function getLogoUrl(): ?string
+    {
+        return $this->logoUrl;
+    }
+    public function setLogoUrl(?string $logoUrl): static
+    {
+        $this->logoUrl = $logoUrl;
+        return $this;
+    }
 
-    public function getDescription(): ?string { return $this->description; }
-    public function setDescription(?string $description): static { $this->description = $description; return $this; }
+    public function getRegistrationNumber(): ?string
+    {
+        return $this->registrationNumber;
+    }
+    public function setRegistrationNumber(?string $registrationNumber): static
+    {
+        $this->registrationNumber = $registrationNumber;
+        return $this;
+    }
 
-    public function getPhone(): ?string { return $this->phone; }
-    public function setPhone(string $phone): static { $this->phone = $phone; return $this; }
+    public function getAddress(): ?string
+    {
+        return $this->address;
+    }
+    public function setAddress(?string $address): static
+    {
+        $this->address = $address;
+        return $this;
+    }
 
-    public function getEmail(): ?string { return $this->email; }    
-    public function setEmail(string $email): static { $this->email = $email; return $this; }
+    public function getBannerUrl(): ?string
+    {
+        return $this->bannerUrl;
+    }
+    public function setBannerUrl(?string $bannerUrl): static
+    {
+        $this->bannerUrl = $bannerUrl;
+        return $this;
+    }
 
-    public function getPasswordHash(): ?string { return $this->passwordHash; }
-    public function setPasswordHash(string $passwordHash): static { $this->passwordHash = $passwordHash; return $this; }
+    public function getWebsiteUrl(): ?string
+    {
+        return $this->websiteUrl;
+    }
+    public function setWebsiteUrl(?string $websiteUrl): static
+    {
+        $this->websiteUrl = $websiteUrl;
+        return $this;
+    }
 
-    public function getStatus(): string { return $this->status; }
-    public function setStatus(string $status): static { $this->status = $status; return $this; }
+    public function getMapUrl(): ?string
+    {
+        return $this->mapUrl;
+    }
+    public function setMapUrl(?string $mapUrl): static
+    {
+        $this->mapUrl = $mapUrl;
+        return $this;
+    }
 
-    public function getRatingCache(): ?string { return $this->ratingCache; }
-    public function setRatingCache(?string $ratingCache): static { $this->ratingCache = $ratingCache; return $this; }
+    public function getDescription(): ?string
+    {
+        return $this->description;
+    }
+    public function setDescription(?string $description): static
+    {
+        $this->description = $description;
+        return $this;
+    }
 
-    public function getCreatedAt(): ?\DateTimeInterface { return $this->createdAt; }
+    public function getPhone(): ?string
+    {
+        return $this->phone;
+    }
+    public function setPhone(string $phone): static
+    {
+        $this->phone = $phone;
+        return $this;
+    }
+
+    /**
+     * @return Collection<int, AgencyDocument>
+     */
+    public function getDocuments(): Collection
+    {
+        return $this->documents;
+    }
+
+    public function addDocument(AgencyDocument $document): static
+    {
+        if (!$this->documents->contains($document)) {
+            $this->documents->add($document);
+            $document->setAgency($this);
+        }
+
+        return $this;
+    }
+
+    public function removeDocument(AgencyDocument $document): static
+    {
+        if ($this->documents->removeElement($document)) {
+            if ($document->getAgency() === $this) {
+                $document->setAgency(null);
+            }
+        }
+
+        return $this;
+    }
+
+    public function getEmail(): ?string
+    {
+        return $this->email;
+    }
+    public function setEmail(string $email): static
+    {
+        $this->email = $email;
+        return $this;
+    }
+
+    public function getPasswordHash(): ?string
+    {
+        return $this->passwordHash;
+    }
+    public function setPasswordHash(string $passwordHash): static
+    {
+        $this->passwordHash = $passwordHash;
+        return $this;
+    }
+
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+    public function setStatus(string $status): static
+    {
+        $this->status = $status;
+        return $this;
+    }
+
+    public function getRatingCache(): ?string
+    {
+        return $this->ratingCache;
+    }
+    public function setRatingCache(?string $ratingCache): static
+    {
+        $this->ratingCache = $ratingCache;
+        return $this;
+    }
+
+    public function getCreatedAt(): ?\DateTimeInterface
+    {
+        return $this->createdAt;
+    }
 }

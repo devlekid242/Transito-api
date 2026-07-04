@@ -36,7 +36,7 @@ class SupportResponse
     private ?SupportTicket $ticket = null;
 
     #[ORM\ManyToOne(targetEntity: Agent::class)]
-    #[ORM\JoinColumn(nullable: true, onDelete: 'SET NULL')]
+    #[ORM\JoinColumn(name: 'agent_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
     private ?Agent $agent = null;
 
     #[ORM\Column(type: 'text')]

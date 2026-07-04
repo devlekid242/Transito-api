@@ -2,8 +2,10 @@
 
 namespace App\Controller;
 
-use App\Entity\SupportTicket;
+use App\Entity\Notification;
 use App\Entity\SupportResponse;
+use App\Entity\SupportTicket;
+use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -12,7 +14,7 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class SupportController extends AbstractController
 {
-    public function __construct(private EntityManagerInterface $em) {}
+    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
     #[Route('/api/support', name: 'create_support', methods: ['POST'])]
     public function create(Request $request): JsonResponse
@@ -26,8 +28,22 @@ class SupportController extends AbstractController
         $ticket->setMessage($data['message'] ?? '');
         $ticket->setCategory($data['category'] ?? 'other');
         $ticket->setPriority($data['priority'] ?? 'medium');
-        $this->em->persist($ticket);
+        if ($ticket->getUser()) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($ticket->getUser()->getId())
+                ->setTitle('Ticket de support créé')
+                ->setContent(sprintf('Votre demande de support «%s» a bien été enregistrée.', $ticket->getSubject()))
+                ->setCategory('SUPPORT');
+            $this->em->persist($notification);
+        }
+
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
+
         return new JsonResponse(['id' => $ticket->getId()], 201);
     }
 
@@ -50,8 +66,23 @@ class SupportController extends AbstractController
         $resp = new SupportResponse();
         $resp->setTicket($ticket);
         $resp->setMessage($data['message'] ?? '');
+        if ($ticket->getUser()) {
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($ticket->getUser()->getId())
+                ->setTitle('Réponse au support')
+                ->setContent('Une réponse a été ajoutée à votre ticket de support. Consultez la conversation pour plus de détails.')
+                ->setCategory('SUPPORT');
+            $this->em->persist($notification);
+        }
+
         $this->em->persist($resp);
         $this->em->flush();
+
+        if (isset($notification)) {
+            $this->notificationBroadcaster->broadcast($notification);
+        }
+
         return new JsonResponse(['id' => $resp->getId()], 201);
     }
 }

@@ -3,26 +3,41 @@
 namespace App\Controller;
 
 use App\Entity\User;
+use App\Entity\Agent;
+use App\Entity\Agency;
+use App\Repository\AgentRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
+use Symfony\Component\Routing\Attribute\Route;
 
 class UserController extends AbstractController
 {
-    public function currentUser(): JsonResponse
+    public function currentUser(AgentRepository $agentRepository): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
             return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        return $this->json($this->serializeUser($user));
+        $profile = $this->serializeUser($user);
+        $agent = $agentRepository->findOneBy(['user' => $user]);
+        if ($agent) {
+            $profile['agent'] = [
+                'id' => $agent->getId(),
+                'agentRole' => $agent->getAgentRole(),
+                'status' => $agent->getStatus(),
+                'agency' => $agent->getAgency() ? $this->serializeAgency($agent->getAgency()) : null,
+            ];
+        }
+
+        return $this->json($profile);
     }
 
-    public function update(Request $request, EntityManagerInterface $em): JsonResponse
+    public function update(Request $request, EntityManagerInterface $em, AgentRepository $agentRepository): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -56,7 +71,17 @@ class UserController extends AbstractController
         $em->persist($user);
         $em->flush();
 
-        return $this->json($this->serializeUser($user));
+        $profile = $this->serializeUser($user);
+        // if ($agent) {
+        //     $profile['agent'] = [
+        //         'id' => $agent->getId(),
+        //         'agentRole' => $agent->getAgentRole(),
+        //         'status' => $agent->getStatus(),
+        //         'agency' => $agent->getAgency() ? $this->serializeAgency($agent->getAgency()) : null,
+        //     ];
+        // }
+
+        return $this->json($profile);
     }
 
     public function updatePhoto(Request $request, EntityManagerInterface $em): JsonResponse
@@ -128,6 +153,99 @@ class UserController extends AbstractController
         return $this->json(['message' => 'Mot de passe mis à jour avec succès.']);
     }
 
+    #[Route('/api/users/staff', name: 'api_users_create_staff', methods: ['POST'])]
+    public function createStaff(Request $request, EntityManagerInterface $em, UserPasswordHasherInterface $passwordHasher): JsonResponse
+    {
+        // Only admins may create staff via this endpoint
+        if (!$this->isGranted('ROLE_ADMIN')) {
+            return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+        if (!is_array($payload)) {
+            return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $fullName = $payload['fullName'] ?? null;
+        $email = $payload['email'] ?? null;
+        $phoneNumber = $payload['phoneNumber'] ?? null;
+        $password = $payload['password'] ?? null;
+
+        if (!$fullName || !$phoneNumber) {
+            return $this->json(['message' => 'fullName et phoneNumber sont requis.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        // uniqueness checks
+        $existing = $em->getRepository(User::class)->findOneBy(['phoneNumber' => $phoneNumber]);
+        if ($existing) {
+            return $this->json(['message' => 'Un utilisateur avec ce numéro existe déjà.'], Response::HTTP_CONFLICT);
+        }
+        if ($email) {
+            $existingEmail = $em->getRepository(User::class)->findOneBy(['email' => $email]);
+            if ($existingEmail) {
+                return $this->json(['message' => 'Un utilisateur avec cet email existe déjà.'], Response::HTTP_CONFLICT);
+            }
+        }
+
+        $user = new User();
+        $user->setFullName($fullName);
+        $user->setEmail($email);
+        $user->setPhoneNumber($phoneNumber);
+        $user->setRoles(['ROLE_USER', 'ROLE_PARTNER']);
+
+        if (!$password) {
+            try {
+                $password = bin2hex(random_bytes(6));
+            } catch (\Exception $e) {
+                $password = uniqid('pw_', true);
+            }
+        }
+
+        $hashed = $passwordHasher->hashPassword($user, $password);
+        $user->setPassword($hashed);
+
+        $em->persist($user);
+
+        // optional agent creation
+        $agent = null;
+        if (!empty($payload['agent']) && is_array($payload['agent'])) {
+            $agentData = $payload['agent'];
+            $agencyId = $agentData['agencyId'] ?? null;
+            if ($agencyId) {
+                $agency = $em->getRepository(Agency::class)->find($agencyId);
+                if ($agency) {
+                    $agent = new Agent();
+                    $agent->setUser($user);
+                    $agent->setAgency($agency);
+                    $agent->setAgentRole($agentData['agentRole'] ?? 'agent_quai');
+                    $agent->setStatus($agentData['status'] ?? 'active');
+                    $em->persist($agent);
+                }
+            }
+        }
+
+        $em->flush();
+
+        $res = [
+            'id' => $user->getId(),
+            'fullName' => $user->getFullName(),
+            'email' => $user->getEmail(),
+            'phoneNumber' => $user->getPhoneNumber(),
+            'roles' => $user->getRoles(),
+        ];
+
+        if ($agent) {
+            $res['agent'] = [
+                'id' => $agent->getId(),
+                'agentRole' => $agent->getAgentRole(),
+                'status' => $agent->getStatus(),
+                'agency' => $agent->getAgency() ? ['id' => $agent->getAgency()->getId(), 'name' => $agent->getAgency()->getName()] : null,
+            ];
+        }
+
+        return $this->json($res, Response::HTTP_CREATED);
+    }
+
     private function serializeUser(User $user): array
     {
         return [
@@ -145,6 +263,35 @@ class UserController extends AbstractController
             'profilePhotoUrl' => $user->getProfilePhotoUrl(),
             'createdAt' => $user->getCreatedAt()?->format(\DateTimeInterface::ATOM),
             'updatedAt' => $user->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+        ];
+    }
+
+    private function serializeAgency(Agency $agency): array
+    {
+        return [
+            'id' => $agency->getId(),
+            'name' => $agency->getName(),
+            'registrationNumber' => $agency->getRegistrationNumber(),
+            'address' => $agency->getAddress(),
+            'bannerUrl' => $agency->getBannerUrl(),
+            'logoUrl' => $agency->getLogoUrl(),
+            'websiteUrl' => $agency->getWebsiteUrl(),
+            'mapUrl' => $agency->getMapUrl(),
+            'description' => $agency->getDescription(),
+            'phone' => $agency->getPhone(),
+            'email' => $agency->getEmail(),
+            'status' => $agency->getStatus(),
+            'ratingCache' => $agency->getRatingCache(),
+            'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'documents' => array_map(fn($doc) => [
+                'id' => $doc->getId(),
+                'name' => $doc->getName(),
+                'fileUrl' => $doc->getFileUrl(),
+                'type' => $doc->getType(),
+                'status' => $doc->getStatus(),
+                'expiryDate' => $doc->getExpiryDate()?->format(\DateTimeInterface::ATOM),
+                'createdAt' => $doc->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            ], iterator_to_array($agency->getDocuments())),
         ];
     }
 }

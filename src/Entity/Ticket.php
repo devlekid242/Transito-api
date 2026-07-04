@@ -80,7 +80,7 @@ class Ticket
     private ?\DateTimeInterface $validatedAt = null;
 
     #[ORM\ManyToOne(targetEntity: Agent::class)]
-    #[ORM\JoinColumn(name: 'validated_by_agent', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[ORM\JoinColumn(name: 'validated_by_agent_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
     #[Groups(['ticket:read', 'ticket:write'])]
     private ?Agent $validatedByAgent = null;
 

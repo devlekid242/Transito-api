@@ -3,7 +3,9 @@
 namespace App\Controller;
 
 use App\Entity\User;
+use App\Entity\Agent;
 use App\Repository\UserRepository;
+use App\Repository\AgentRepository;
 use App\Service\RefreshTokenService;
 use App\Service\TwilioService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -22,6 +24,7 @@ class AuthController extends AbstractController
     public function login(
         Request $request,
         UserRepository $userRepository,
+        AgentRepository $agentRepository,
         UserPasswordHasherInterface $passwordHasher,
         JWTTokenManagerInterface $jwtManager,
         RefreshTokenService $refreshTokenService
@@ -32,13 +35,21 @@ class AuthController extends AbstractController
         }
 
         $phoneNumber = $payload['phoneNumber'] ?? null;
+        $email = $payload['email'] ?? null;
         $password = $payload['password'] ?? null;
 
-        if (!$phoneNumber || !$password) {
-            return $this->json(['message' => 'phoneNumber et password sont requis.'], Response::HTTP_BAD_REQUEST);
+        // Accept either phoneNumber or email as identifier for login
+        $identifier = $phoneNumber ?? $email;
+
+        if (!$identifier || !$password) {
+            return $this->json(['message' => 'Identifiant (phoneNumber ou email) et password sont requis.'], Response::HTTP_BAD_REQUEST);
         }
 
-        $user = $userRepository->findOneBy(['phoneNumber' => $phoneNumber]);
+        if (filter_var($identifier, FILTER_VALIDATE_EMAIL)) {
+            $user = $userRepository->findOneBy(['email' => $identifier]);
+        } else {
+            $user = $userRepository->findOneBy(['phoneNumber' => $identifier]);
+        }
 
         if (!$user || !$passwordHasher->isPasswordValid($user, $password)) {
             return $this->json(['message' => 'Identifiants invalides.'], Response::HTTP_UNAUTHORIZED);
@@ -47,19 +58,36 @@ class AuthController extends AbstractController
         $token = $jwtManager->create($user);
         $refreshToken = $refreshTokenService->issueForUser($user);
 
+        // Check if user is also an agent
+        $agent = $agentRepository->findOneBy(['user' => $user]);
+
+        $userData = [
+            'id' => $user->getId(),
+            'fullName' => $user->getFullName(),
+            'email' => $user->getEmail(),
+            'phoneNumber' => $user->getPhoneNumber(),
+            'roles' => $user->getRoles(),
+            'profilePhotoUrl' => $user->getProfilePhotoUrl(),
+        ];
+
+        if ($agent) {
+            $userData['agent'] = [
+                'agentRole' => $agent->getAgentRole(),
+                'status' => $agent->getStatus(),
+                'agency' => $agent->getAgency() ? [
+                    'id' => $agent->getAgency()->getId(),
+                    'name' => $agent->getAgency()->getName(),
+                ] : null,
+            ];
+        }
+
         return $this->json([
             'token' => $token,
             'token_type' => 'Bearer',
             'expires_in' => 3600,
             'refresh_token' => $refreshToken['plain'],
             'refresh_expires_at' => $refreshToken['entity']->getExpiresAt()?->format(\DateTimeInterface::ATOM),
-            'user' => [
-                'id' => $user->getId(),
-                'fullName' => $user->getFullName(),
-                'email' => $user->getEmail(),
-                'phoneNumber' => $user->getPhoneNumber(),
-                'roles' => $user->getRoles(),
-            ],
+            'user' => $userData,
         ]);
     }
 
@@ -129,10 +157,10 @@ class AuthController extends AbstractController
         $em->flush();
 
         $message = sprintf("Votre code de récupération Transito est : %s (valable 15 minutes)", $code);
-        $sent = $twilioService->sendWhatsApp(str_contains($phoneNumber, "+242") ? $phoneNumber :"+242{$phoneNumber}", $message);
-        
+        $sent = $twilioService->sendWhatsApp(str_contains($phoneNumber, "+242") ? $phoneNumber : "+242{$phoneNumber}", $message);
+
         if (!$sent) {
-            
+
             return $this->json(['message' => 'Impossible d\'envoyer le code pour le moment.', 'data' => $sent], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
 
@@ -187,6 +215,7 @@ class AuthController extends AbstractController
     public function register(
         Request $request,
         UserRepository $userRepository,
+        AgentRepository $agentRepository,
         UserPasswordHasherInterface $passwordHasher,
         EntityManagerInterface $em,
         JWTTokenManagerInterface $jwtManager,
@@ -217,7 +246,7 @@ class AuthController extends AbstractController
         $user->setEmail($email);
         $user->setPhoneNumber($phoneNumber);
         $user->setRoles(['ROLE_USER']);
-        
+
         $hashedPassword = $passwordHasher->hashPassword($user, $password);
         $user->setPassword($hashedPassword);
 
@@ -228,6 +257,15 @@ class AuthController extends AbstractController
         $token = $jwtManager->create($user);
         $refreshToken = $refreshTokenService->issueForUser($user);
 
+        $userData = [
+            'id' => $user->getId(),
+            'fullName' => $user->getFullName(),
+            'email' => $user->getEmail(),
+            'phoneNumber' => $user->getPhoneNumber(),
+            'roles' => $user->getRoles(),
+        ];
+
+
         return $this->json(
             [
                 'message' => 'Utilisateur créé avec succès.',
@@ -236,13 +274,7 @@ class AuthController extends AbstractController
                 'expires_in' => 3600,
                 'refresh_token' => $refreshToken['plain'],
                 'refresh_expires_at' => $refreshToken['entity']->getExpiresAt()?->format(\DateTimeInterface::ATOM),
-                'user' => [
-                    'id' => $user->getId(),
-                    'fullName' => $user->getFullName(),
-                    'email' => $user->getEmail(),
-                    'phoneNumber' => $user->getPhoneNumber(),
-                    'roles' => $user->getRoles(),
-                ],
+                'user' => $userData,
             ],
             Response::HTTP_CREATED
         );
