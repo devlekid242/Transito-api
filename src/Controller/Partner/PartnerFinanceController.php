@@ -6,6 +6,8 @@ use App\Entity\PaymentLog;
 use App\Entity\Reservation;
 use App\Entity\WithdrawalRequest;
 use App\Entity\User;
+use App\Entity\Agent;
+use App\Entity\Trip;
 use App\Repository\PaymentLogRepository;
 use App\Repository\WithdrawalRequestRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -23,6 +25,18 @@ class PartnerFinanceController extends AbstractController
         private WithdrawalRequestRepository $withdrawalRepository
     ) {}
 
+    /**
+     * Récupère l'agence associée à l'utilisateur courant (Agent)
+     */
+    private function getAgencyForUser(User $user)
+    {
+        $agent = $this->em->getRepository(Agent::class)->findOneBy(['user' => $user]);
+        if (!$agent) {
+            return null;
+        }
+        return $agent->getAgency();
+    }
+
     #[Route('/api/statistics', name: 'api_statistics', methods: ['GET'])]
     public function getPartnerStats(): JsonResponse
     {
@@ -31,9 +45,30 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $reservations = $this->em->getRepository(Reservation::class)->findBy(['user' => $user]);
+        // Récupérer l'agence de l'utilisateur (Agent)
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
+        // Récupérer tous les trajets de cette agence
+        $trips = $this->em->getRepository(Trip::class)->findBy(['agency' => $agency]);
+        $tripIds = array_map(fn(Trip $t) => $t->getId(), $trips);
+
+        // Récupérer toutes les réservations pour les trajets de cette agence
+        if (empty($tripIds)) {
+            // Si pas de trajets, retourner des stats vides
+            $reservations = [];
+        } else {
+            $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
+                ->where('r.trip IN (:tripIds)')
+                ->setParameter('tripIds', $tripIds)
+                ->getQuery()
+                ->getResult();
+        }
+
         $totalRevenue = 0.0;
-        $totalTrips = 0;
+        $totalTrips = count($trips);
         $totalPassengers = 0;
         $balanceAvailable = 0.0;
         $balancePending = 0.0;
@@ -41,7 +76,6 @@ class PartnerFinanceController extends AbstractController
 
         foreach ($reservations as $reservation) {
             $totalRevenue += (float) $reservation->getTotalAmount();
-            $totalTrips++;
             $totalPassengers += count($reservation->getTickets() ?? []);
             if ($reservation->getPaymentStatus() === 'paye') {
                 $balanceAvailable += (float) $reservation->getTotalAmount();
@@ -60,11 +94,12 @@ class PartnerFinanceController extends AbstractController
             }
         }
 
+        // Transactions récentes pour les réservations de cette agence
         $recentTransactions = $this->paymentLogRepository->createQueryBuilder('p')
             ->join('p.reservation', 'r')
-            ->join('r.user', 'u')
-            ->where('u.id = :uid')
-            ->setParameter('uid', $user->getId())
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency)
             ->orderBy('p.createdAt', 'DESC')
             ->setMaxResults(5)
             ->getQuery()
@@ -88,13 +123,14 @@ class PartnerFinanceController extends AbstractController
             $dailyTotals[$date->format('Y-m-d')] = 0.0;
         }
 
+        // Transactions par jour pour cette agence
         $transactionsByDay = $this->paymentLogRepository->createQueryBuilder('p')
             ->select('DATE(p.createdAt) as day, SUM(p.amount) as total')
             ->join('p.reservation', 'r')
-            ->join('r.user', 'u')
-            ->where('u.id = :uid')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
             ->andWhere('p.createdAt >= :start')
-            ->setParameter('uid', $user->getId())
+            ->setParameter('agency', $agency)
             ->setParameter('start', $today->sub(new \DateInterval('P5D'))->setTime(0, 0, 0))
             ->groupBy('day')
             ->getQuery()
@@ -106,13 +142,14 @@ class PartnerFinanceController extends AbstractController
             }
         }
 
+        // Répartition par statut pour cette agence
         $breakdownStats = $this->paymentLogRepository->createQueryBuilder('p')
             ->select('p.status as status, COUNT(p.id) as count')
             ->join('p.reservation', 'r')
-            ->join('r.user', 'u')
-            ->where('u.id = :uid')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
             ->groupBy('p.status')
-            ->setParameter('uid', $user->getId())
+            ->setParameter('agency', $agency)
             ->getQuery()
             ->getArrayResult();
 
@@ -268,6 +305,12 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        // Récupérer l'agence
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
         $data = json_decode($request->getContent(), true);
         if (!is_array($data)) {
             return new JsonResponse(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
@@ -284,14 +327,26 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Méthode de retrait requise.'], Response::HTTP_BAD_REQUEST);
         }
 
-        // Calculate available balance for the partner (sum of paid reservations minus approved withdrawals)
-        $reservations = $this->em->getRepository(Reservation::class)->findBy(['user' => $user]);
+        // Calculer le solde disponible basé sur les trajets et réservations de l'agence
+        $trips = $this->em->getRepository(Trip::class)->findBy(['agency' => $agency]);
+        $tripIds = array_map(fn(Trip $t) => $t->getId(), $trips);
+
         $balanceAvailable = 0.0;
-        foreach ($reservations as $reservation) {
-            if ($reservation->getPaymentStatus() === 'paye') {
+        if (!empty($tripIds)) {
+            $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
+                ->where('r.trip IN (:tripIds)')
+                ->andWhere('r.paymentStatus = :paid')
+                ->setParameter('tripIds', $tripIds)
+                ->setParameter('paid', 'paye')
+                ->getQuery()
+                ->getResult();
+
+            foreach ($reservations as $reservation) {
                 $balanceAvailable += (float) $reservation->getTotalAmount();
             }
         }
+
+        // Déduire les retraits approuvés
         $withdrawals = $this->withdrawalRepository->findByUser($user);
         foreach ($withdrawals as $w) {
             if ($w->getStatus() === 'approved') {
@@ -306,10 +361,12 @@ class PartnerFinanceController extends AbstractController
             ], Response::HTTP_BAD_REQUEST);
         }
 
+        // return $this->json($method[0]);
+
         $withdrawal = new WithdrawalRequest();
         $withdrawal->setUser($user);
         $withdrawal->setAmount((string)$amount);
-        $withdrawal->setMethod($method);
+        $withdrawal->setMethod($method[0]);
         $withdrawal->setNotes($notes);
         $withdrawal->setStatus('pending');
 
@@ -374,13 +431,19 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        // Récupérer l'agence
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
         $query = $this->paymentLogRepository->createQueryBuilder('p')
             ->select('p.status as status, COUNT(p.id) as count, SUM(p.amount) as total')
             ->join('p.reservation', 'r')
-            ->join('r.user', 'u')
-            ->where('u.id = :uid')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
             ->groupBy('p.status')
-            ->setParameter('uid', $user->getId())
+            ->setParameter('agency', $agency)
             ->getQuery();
 
         $stats = $query->getArrayResult();
@@ -403,14 +466,20 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        // Récupérer l'agence
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
         $start = $request->query->get('start');
         $end = $request->query->get('end');
 
         $qb = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
             ->select('r.transactionReference AS reference, r.totalAmount AS amount, r.paymentStatus AS status, r.createdAt AS createdAt')
-            ->join('r.user', 'u')
-            ->where('u.id = :uid')
-            ->setParameter('uid', $user->getId())
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency)
             ->andWhere('r.paymentStatus = :paid')
             ->setParameter('paid', 'paye');
 
@@ -424,7 +493,7 @@ class PartnerFinanceController extends AbstractController
         $results = $qb->orderBy('r.createdAt', 'ASC')->getQuery()->getArrayResult();
         $series = [];
         foreach ($results as $row) {
-            $dateKey = (new \DateTime($row['createdAt']))->format('Y-m-d');
+            $dateKey = $row['createdAt']->format('Y-m-d');
             if (!isset($series[$dateKey])) {
                 $series[$dateKey] = 0.0;
             }

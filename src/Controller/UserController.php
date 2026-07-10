@@ -5,6 +5,7 @@ namespace App\Controller;
 use App\Entity\User;
 use App\Entity\Agent;
 use App\Entity\Agency;
+use App\Repository\AgencyRepository;
 use App\Repository\AgentRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -16,6 +17,9 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class UserController extends AbstractController
 {
+    public function __construct(private AgentRepository $agentRepository) {}
+
+
     public function currentUser(AgentRepository $agentRepository): JsonResponse
     {
         $user = $this->getUser();
@@ -37,7 +41,8 @@ class UserController extends AbstractController
         return $this->json($profile);
     }
 
-    public function update(Request $request, EntityManagerInterface $em, AgentRepository $agentRepository): JsonResponse
+
+    public function update(Request $request, EntityManagerInterface $em): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -49,37 +54,56 @@ class UserController extends AbstractController
             return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
 
+        // Champs obligatoires côté entité (Assert\NotBlank) : on refuse une valeur vide explicite
+        $requiredFields = ['fullName', 'phoneNumber', 'villeResidence', 'quartier'];
+        foreach ($requiredFields as $field) {
+            if (array_key_exists($field, $data) && trim((string) $data[$field]) === '') {
+                return $this->json(
+                    ['message' => "Le champ \"{$field}\" ne peut pas être vide."],
+                    Response::HTTP_BAD_REQUEST
+                );
+            }
+        }
+
         if (array_key_exists('fullName', $data)) {
-            $user->setFullName((string)$data['fullName']);
+            $user->setFullName((string) $data['fullName']);
         }
         if (array_key_exists('email', $data)) {
-            $user->setEmail($data['email'] !== null ? (string)$data['email'] : null);
+            $user->setEmail($data['email'] !== null ? (string) $data['email'] : null);
         }
         if (array_key_exists('phoneNumber', $data)) {
-            $user->setPhoneNumber((string)$data['phoneNumber']);
+            $user->setPhoneNumber((string) $data['phoneNumber']);
         }
+
+        // --- Champs auparavant absents du contrôleur ---
+        if (array_key_exists('villeResidence', $data)) {
+            $user->setVilleResidence((string) $data['villeResidence']);
+        }
+        if (array_key_exists('quartier', $data)) {
+            $user->setQuartier((string) $data['quartier']);
+        }
+        if (array_key_exists('emergencyContactName', $data)) {
+            $user->setEmergencyContactName((string) $data['emergencyContactName']);
+        }
+        if (array_key_exists('emergencyContactPhone', $data)) {
+            $user->setEmergencyContactPhone((string) $data['emergencyContactPhone']);
+        }
+        // --- Fin des champs ajoutés ---
+
         if (array_key_exists('prefNotifications', $data)) {
-            $user->setPrefNotifications((int)$data['prefNotifications']);
+            $user->setPrefNotifications((int) $data['prefNotifications']);
         }
         if (array_key_exists('prefLanguage', $data)) {
-            $user->setPrefLanguage((string)$data['prefLanguage']);
+            $user->setPrefLanguage((string) $data['prefLanguage']);
         }
         if (array_key_exists('prefDarkMode', $data)) {
-            $user->setPrefDarkMode((int)$data['prefDarkMode']);
+            $user->setPrefDarkMode((int) $data['prefDarkMode']);
         }
 
         $em->persist($user);
         $em->flush();
 
         $profile = $this->serializeUser($user);
-        // if ($agent) {
-        //     $profile['agent'] = [
-        //         'id' => $agent->getId(),
-        //         'agentRole' => $agent->getAgentRole(),
-        //         'status' => $agent->getStatus(),
-        //         'agency' => $agent->getAgency() ? $this->serializeAgency($agent->getAgency()) : null,
-        //     ];
-        // }
 
         return $this->json($profile);
     }
@@ -153,11 +177,40 @@ class UserController extends AbstractController
         return $this->json(['message' => 'Mot de passe mis à jour avec succès.']);
     }
 
+    #[Route('/api/users/staff', name: 'api_users_get_staff', methods: ['GET'])]
+    public function getStaffUsers(): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $this->getAuthenticatedAgency($this->agentRepository);
+        if (!$agency) {
+            return $this->json(['message' => 'Aucune agence associée à l\'utilisateur authentifié.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $agents = $this->agentRepository->findBy(['agency' => $agency]);
+        $staffUsers = array_map(function (Agent $agent) {
+            $user = $agent->getUser();
+            return [
+                'id' => $user->getId(),
+                'fullName' => $user->getFullName(),
+                'email' => $user->getEmail(),
+                'phoneNumber' => $user->getPhoneNumber(),
+                'roles' => $user->getRoles(),
+                'agentRole' => $agent->getAgentRole(),
+                'status' => $agent->getStatus(),
+            ];
+        }, $agents);
+        return $this->json($staffUsers);
+    }
+
     #[Route('/api/users/staff', name: 'api_users_create_staff', methods: ['POST'])]
-    public function createStaff(Request $request, EntityManagerInterface $em, UserPasswordHasherInterface $passwordHasher): JsonResponse
+    public function createStaff(Request $request, EntityManagerInterface $em, UserPasswordHasherInterface $passwordHasher, AgentRepository $agentRepo): JsonResponse
     {
         // Only admins may create staff via this endpoint
-        if (!$this->isGranted('ROLE_ADMIN')) {
+        if (!$this->isGranted('ROLE_PARTNER')) {
             return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
         }
 
@@ -165,14 +218,21 @@ class UserController extends AbstractController
         if (!is_array($payload)) {
             return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
+        // return $this->json($payload);
 
         $fullName = $payload['fullName'] ?? null;
         $email = $payload['email'] ?? null;
         $phoneNumber = $payload['phoneNumber'] ?? null;
         $password = $payload['password'] ?? null;
+        $villeResidence = $payload['ville'] ?? null;
+        $quartier = $payload['quartier'] ?? null;
 
         if (!$fullName || !$phoneNumber) {
             return $this->json(['message' => 'fullName et phoneNumber sont requis.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        if(!$villeResidence || !$quartier){
+            return $this->json(['message' => 'la ville de residence et le quartier sont requis.'], Response::HTTP_BAD_REQUEST);
         }
 
         // uniqueness checks
@@ -191,6 +251,8 @@ class UserController extends AbstractController
         $user->setFullName($fullName);
         $user->setEmail($email);
         $user->setPhoneNumber($phoneNumber);
+        $user->setVilleResidence($villeResidence);
+        $user->setQuartier($quartier);
         $user->setRoles(['ROLE_USER', 'ROLE_PARTNER']);
 
         if (!$password) {
@@ -206,22 +268,15 @@ class UserController extends AbstractController
 
         $em->persist($user);
 
-        // optional agent creation
-        $agent = null;
-        if (!empty($payload['agent']) && is_array($payload['agent'])) {
-            $agentData = $payload['agent'];
-            $agencyId = $agentData['agencyId'] ?? null;
-            if ($agencyId) {
-                $agency = $em->getRepository(Agency::class)->find($agencyId);
-                if ($agency) {
-                    $agent = new Agent();
-                    $agent->setUser($user);
-                    $agent->setAgency($agency);
-                    $agent->setAgentRole($agentData['agentRole'] ?? 'agent_quai');
-                    $agent->setStatus($agentData['status'] ?? 'active');
-                    $em->persist($agent);
-                }
-            }
+        $agency = $this->getAuthenticatedAgency($agentRepo);        
+
+        if ($agency) {
+            $agent = new Agent();
+            $agent->setUser($user);
+            $agent->setAgency($agency);
+            $agent->setAgentRole($agentData['agentRole'] ?? 'agent_quai');
+            $agent->setStatus('active');
+            $em->persist($agent);
         }
 
         $em->flush();
@@ -253,6 +308,8 @@ class UserController extends AbstractController
             'fullName' => $user->getFullName(),
             'email' => $user->getEmail(),
             'phoneNumber' => $user->getPhoneNumber(),
+            'villeResidence' => $user->getVilleResidence(),
+            'quartier' => $user->getQuartier(),
             'role' => $user->getRoles()[0] ?? 'Utilisateur',
             'prefNotifications' => $user->getPrefNotifications(),
             'prefLanguage' => $user->getPrefLanguage(),
@@ -293,5 +350,16 @@ class UserController extends AbstractController
                 'createdAt' => $doc->getCreatedAt()?->format(\DateTimeInterface::ATOM),
             ], iterator_to_array($agency->getDocuments())),
         ];
+    }
+
+    private function getAuthenticatedAgency(AgentRepository $agentRepository): ?Agency
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return null;
+        }
+
+        $agent = $agentRepository->findOneBy(['user' => $user]);
+        return $agent?->getAgency();
     }
 }

@@ -25,6 +25,12 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[ApiResource(
     operations: [
         new GetCollection(),
+        new GetCollection(
+            uriTemplate: '/users/staff',
+            controller: UserController::class . '::getStaffUsers',
+            read: false,
+            name: 'api_users_get_staff'
+        ),
         new Get(
             uriTemplate: '/users/me',
             controller: UserController::class . '::currentUser',
@@ -78,6 +84,30 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[Assert\NotBlank(message: "Le numéro de téléphone est obligatoire.")]
     #[Groups(['user:write'])]
     private ?string $phoneNumber = null;
+
+    /* NOUVEAU CHAMP : VILLE DE RÉSIDENCE */
+    #[ORM\Column(name: 'ville_residence', length: 100)]
+    #[Assert\NotBlank(message: "La ville de résidence est obligatoire.")]
+    #[Groups(['user:write'])]
+    private ?string $villeResidence = null;
+
+    /* NOUVEAU CHAMP : QUARTIER */
+    #[ORM\Column(name: 'quartier', length: 100)]
+    #[Assert\NotBlank(message: "Le quartier de résidence est obligatoire.")]
+    #[Groups(['user:write'])]
+    private ?string $quartier = null;
+
+    /* NOUVEAU CHAMP : NOM DE L'URGENCE */
+    #[ORM\Column(name: 'emergency_contact_name', length: 100, nullable: true)]
+    #[Assert\NotBlank(message: "Le nom du contact d'urgence est obligatoire.")]
+    #[Groups(['user:write'])]
+    private ?string $emergencyContactName = null;
+
+    /* NOUVEAU CHAMP : TÉLÉPHONE DE L'URGENCE */
+    #[ORM\Column(name: 'emergency_contact_phone', length: 20, nullable: true)]
+    #[Assert\NotBlank(message: "Le numéro du contact d'urgence est obligatoire.")]
+    #[Groups(['user:write'])]
+    private ?string $emergencyContactPhone = null;
 
     #[ORM\Column(type: 'json')]
     private array $roles = [];
@@ -158,6 +188,52 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
         return $this;
     }
 
+    /* GETTERS & SETTERS POUR LES NOUVEAUX CHAMPS */
+
+    public function getVilleResidence(): ?string
+    {
+        return $this->villeResidence;
+    }
+
+    public function setVilleResidence(string $villeResidence): static
+    {
+        $this->villeResidence = $villeResidence;
+        return $this;
+    }
+
+    public function getQuartier(): ?string
+    {
+        return $this->quartier;
+    }
+
+    public function setQuartier(string $quartier): static
+    {
+        $this->quartier = $quartier;
+        return $this;
+    }
+
+    public function getEmergencyContactName(): ?string
+    {
+        return $this->emergencyContactName;
+    }
+
+    public function setEmergencyContactName(string $emergencyContactName): static
+    {
+        $this->emergencyContactName = $emergencyContactName;
+        return $this;
+    }
+
+    public function getEmergencyContactPhone(): ?string
+    {
+        return $this->emergencyContactPhone;
+    }
+
+    public function setEmergencyContactPhone(string $emergencyContactPhone): static
+    {
+        $this->emergencyContactPhone = $emergencyContactPhone;
+        return $this;
+    }
+
     /**
      * A visual identifier that represents this user.
      *
@@ -174,9 +250,7 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function getRoles(): array
     {
         $roles = $this->roles;
-        // guarantee every user at least has ROLE_USER
         $roles[] = 'ROLE_USER';
-
         return array_unique($roles);
     }
 
@@ -203,10 +277,7 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     /**
      * @see UserInterface
      */
-    public function eraseCredentials(): void
-    {
-        // If you store any temporary, sensitive data on the user, clear it here
-    }
+    public function eraseCredentials(): void {}
 
     public function getPrefNotifications(): int
     {

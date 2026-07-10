@@ -72,11 +72,24 @@ class TicketController extends AbstractController
         return new JsonResponse($out, 200);
     }
 
+    #[Route('/api/tickets/{id}', name: 'get_ticket_by_id', methods: ['GET'])]
+    public function getTicketById(int $id): JsonResponse
+    {
+        $repo = $this->em->getRepository(Ticket::class);
+        $ticket = $repo->find($id);
+        if (!$ticket) return new JsonResponse(['error' => 'Not found'], 404);
+        return new JsonResponse($this->mapTicket($ticket), 200);
+    }
+
     private function mapTicket(Ticket $ticket): array
     {
         $reservation = $ticket->getReservation();
+        $agence =  $reservation?->getTrip()?->getAgency();
+        $agenceName = $agence?->getName() ?? '';
         $trip = $reservation?->getTrip();
         $departureTime = $trip?->getDepartureTime();
+        $arrivalTime = $trip?->getEstimatedArrivalTime();
+        $price = $reservation?->getTotalAmount() ?? 0;
         $statusMap = [
             'en_attente' => 'Actif',
             'embarque' => 'Utilisé',
@@ -87,14 +100,17 @@ class TicketController extends AbstractController
             'reservationId' => $reservation?->getId(),
             'ticketNumber' => 'TKT-' . $ticket->getId(),
             'passengerName' => $ticket->getPassengerName(),
+            'agenceName' => $agenceName,
             'tripNumber' => $trip ? 'TRIP-' . $trip->getId() : null,
             'departureCity' => $trip?->getDepartureCity() ?? $trip?->getDeparturePoint()?->getCity() ?? '',
             'arrivalCity' => $trip?->getArrivalCity() ?? $trip?->getArrivalPoint()?->getCity() ?? '',
             'departureTime' => $departureTime ? $departureTime->format('c') : null,
+            'arrivalTime' => $arrivalTime ? $arrivalTime->format('c') : null,
             'departureDate' => $departureTime ? $departureTime->format('Y-m-d') : null,
             'seatNumber' => (string)$ticket->getSeatNumber(),
             'busLicensePlate' => $trip?->getBus()?->getRegistrationNumber() ?? '',
             'qrCode' => $ticket->getQrCodeToken(),
+            'price' => $price,
             'status' => $statusMap[$ticket->getStatus()] ?? 'Expiré',
             'createdAt' => $ticket->getCreatedAt()?->format('c'),
             'updatedAt' => $ticket->getValidatedAt()?->format('c'),

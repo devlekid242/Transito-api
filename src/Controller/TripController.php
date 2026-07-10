@@ -25,29 +25,31 @@ class TripController extends AbstractController
         private EntityManagerInterface $em,
     ) {}
 
-    public function index(Request $request): JsonResponse
+    public function index(Request $request, AgentRepository $agentRepository): JsonResponse
     {
-        $departureCity = $request->query->get('departure_city');
-        $arrivalCity = $request->query->get('arrival_city');
-        $departureDate = $request->query->get('departure_date');
-        $category = $request->query->get('category');
-        $maxPrice = $request->query->get('max_price');
+        $departureCity = $request->query->get('departure_city')?? null;
+        $arrivalCity = $request->query->get('arrival_city')?? null;
+        $departureDate = $request->query->get('departure_date')?? null;
+        $category = $request->query->get('category')?? null;
+        $maxPrice = $request->query->get('max_price')?? null;
         $page = max(1, (int)$request->query->get('page', 1));
         $limit = max(1, (int)$request->query->get('limit', 10));
 
+        // checher if the user is an agent
         $agency = $this->getAuthenticatedAgency();
-        if (!$agency) {
-            return $this->json(['data' => [], 'total' => 0, 'page' => $page, 'pageSize' => $limit]);
-        }
+
 
         $qb = $this->tripRepository->createQueryBuilder('t')
             ->leftJoin('t.departurePoint', 'dp')
             ->leftJoin('t.arrivalPoint', 'ap')
             ->join('t.agency', 'a')
             ->join('t.bus', 'b')
-            ->andWhere('t.agency = :agency')
-            ->setParameter('agency', $agency)
             ->orderBy('t.departureTime', 'ASC');
+
+        if ($agency) {
+            $qb->andWhere('t.agency = :agency')
+                ->setParameter('agency', $agency);
+        }
 
         if ($departureCity) {
             $qb->andWhere(
@@ -62,6 +64,7 @@ class TripController extends AbstractController
             )
                 ->setParameter('arrivalCity', '%' . mb_strtolower($arrivalCity) . '%');
         }
+
 
         if ($departureDate) {
             try {
@@ -109,11 +112,7 @@ class TripController extends AbstractController
         if (!$trip) {
             return $this->json(['message' => 'Trajet introuvable.'], JsonResponse::HTTP_NOT_FOUND);
         }
-
-        if (!$this->isAllowedAgency($trip->getAgency())) {
-            return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
-        }
-
+        
         return $this->json($this->normalizeTrip($trip));
     }
 

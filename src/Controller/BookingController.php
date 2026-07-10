@@ -15,18 +15,33 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\HttpFoundation\Response;
+use App\Repository\ReservationRepository;
+
 
 class BookingController extends AbstractController
 {
     public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
-    public function create(Request $request): JsonResponse
+    public function create(Request $request, ReservationRepository $reservationRepository): JsonResponse
     {
         $data = json_decode($request->getContent(), true);
         if (!$data) {
             return new JsonResponse(['error' => 'Invalid payload'], 400);
         }
+
+        // Check for duplicate booking based on user and trip
+
+        $user = $this->getUser();
+        $tripId = $data['tripId'] ?? null;
+
+        if ($tripId && $user) {
+            $existingReservation = $reservationRepository->findOneBy(['trip' => $tripId, 'user' => $user, 'paymentStatus' => 'paye']);
+            if ($existingReservation) {
+                return new JsonResponse(['error' => 'A booking for this trip and user already exists'], 409);
+            }
+        }
+
 
         // Required fields from frontend BookingRequest
         $tripId = $data['tripId'] ?? null;
@@ -105,8 +120,8 @@ class BookingController extends AbstractController
             $notification = new Notification();
             $notification->setRecipientType('user')
                 ->setRecipientId($user->getId())
-                ->setTitle('Réservation confirmée')
-                ->setContent(sprintf('Votre réservation pour le trajet %s → %s a été enregistrée.', $trip->getDepartureCity(), $trip->getArrivalCity()))
+                ->setTitle('Réservation enregistrée')
+                ->setContent(sprintf('Votre réservation pour le trajet %s → %s a été enregistrée. En attente de confirmation du paiement.', $trip->getDepartureCity(), $trip->getArrivalCity()))
                 ->setCategory('BOOKING');
             $this->em->persist($notification);
         }

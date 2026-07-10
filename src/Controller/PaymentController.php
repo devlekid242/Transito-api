@@ -105,7 +105,6 @@ class PaymentController extends AbstractController
     }
 
     public function history(): JsonResponse
-
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -125,7 +124,7 @@ class PaymentController extends AbstractController
                 'id' => $l->getId(),
                 'reservationId' => $l->getReservation()?->getId(),
                 'amount' => $l->getAmount(),
-                'operator' => $l->getOperator(),
+                'paymentMethod' => $l->getOperator(),
                 'reference' => $l->getReference(),
                 'status' => $l->getStatus(),
                 'createdAt' => $l->getCreatedAt()?->format('c')

@@ -28,6 +28,11 @@ use App\Controller\TicketController;
             uriTemplate: '/tickets/{id}/validate',
             controller: TicketController::class . '::validateTicket',
             name: 'api_tickets_validate'
+        ),
+        new Get(
+            uriTemplate: '/tickets/{id}',
+            controller: TicketController::class . '::getTicketById',
+            name: 'api_tickets_embark'
         )
     ]
 )]

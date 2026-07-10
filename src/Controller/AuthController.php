@@ -215,7 +215,6 @@ class AuthController extends AbstractController
     public function register(
         Request $request,
         UserRepository $userRepository,
-        AgentRepository $agentRepository,
         UserPasswordHasherInterface $passwordHasher,
         EntityManagerInterface $em,
         JWTTokenManagerInterface $jwtManager,
@@ -230,6 +229,10 @@ class AuthController extends AbstractController
         $email = $payload['email'] ?? null;
         $phoneNumber = $payload['phoneNumber'] ?? null;
         $password = $payload['password'] ?? null;
+        $villeResidence  = $payload['villeResidence'] ?? null;
+        $quartier = $payload['quartier'] ?? null;
+        $emergencyContactName = $payload['emergencyContactName'] ?? null;
+        $emergencyContactPhone = $payload['emergencyContactPhone'] ?? null;
 
         if (!$fullName || !$phoneNumber || !$password) {
             return $this->json(['message' => 'fullName, phoneNumber et password sont requis.'], Response::HTTP_BAD_REQUEST);
@@ -245,6 +248,10 @@ class AuthController extends AbstractController
         $user->setFullName($fullName);
         $user->setEmail($email);
         $user->setPhoneNumber($phoneNumber);
+        $user->setVilleResidence($villeResidence);
+        $user->setQuartier($quartier);
+        $user->setEmergencyContactName($emergencyContactName);
+        $user->setEmergencyContactPhone($emergencyContactPhone);
         $user->setRoles(['ROLE_USER']);
 
         $hashedPassword = $passwordHasher->hashPassword($user, $password);

@@ -32,6 +32,8 @@ class PartnerDashboardFixture extends Fixture
         $dashboardUser->setEmail('admin.ocean@demo.test');
         $dashboardUser->setPhoneNumber('+242066111111');
         $dashboardUser->setRoles(['ROLE_PARTNER', 'ROLE_USER']);
+        $dashboardUser->setVilleResidence('Brazzaville');
+        $dashboardUser->setQuartier('Plateau des 15 ans');
         $dashboardUser->setPassword($this->passwordHasher->hashPassword($dashboardUser, 'Ocean2026!'));
         $dashboardUser->setStatus('active');
 
