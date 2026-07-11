@@ -58,6 +58,8 @@ class BookingController extends AbstractController
             return new JsonResponse(['error' => 'Trip not found'], 404);
         }
 
+        // chech if there is stell place disponible.
+
         $reservation = new Reservation();
         $user = $this->getUser();
         if ($user instanceof User) {

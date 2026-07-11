@@ -9,6 +9,7 @@ use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\Patch;
 use ApiPlatform\Metadata\GetCollection;
 use App\Controller\TicketController;
 
@@ -28,6 +29,11 @@ use App\Controller\TicketController;
             uriTemplate: '/tickets/{id}/validate',
             controller: TicketController::class . '::validateTicket',
             name: 'api_tickets_validate'
+        ),
+        new Patch(
+            uriTemplate: '/tickets/validate',
+            controller: TicketController::class . '::validateTicketByQrCode',
+            name: 'api_tickets_validate_by_qr_code'
         ),
         new Get(
             uriTemplate: '/tickets/{id}',
