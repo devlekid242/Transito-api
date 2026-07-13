@@ -222,6 +222,8 @@ class TripController extends AbstractController
             }
         }
 
+        // return $this->Json($data);
+
         if (!$departureTime) {
             return $this->json(['message' => 'Date/heure de départ invalide.'], Response::HTTP_BAD_REQUEST);
         }
@@ -252,7 +254,7 @@ class TripController extends AbstractController
             ->setArrivalTimeOfDay($arrivalTimeOfDay)
             ->setPrice((string)($data['price'] ?? '0'))
             ->setDriverName($data['driverName'] ?? null)
-            ->setStatus($data['status'] ?? 'planifie')
+            ->setStatus($data['status'][0] ?? 'planifie')
             ->setSeatsReserved((int)($data['seatsReserved'] ?? 0));
 
         $this->em->persist($trip);

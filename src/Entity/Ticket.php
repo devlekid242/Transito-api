@@ -21,6 +21,11 @@ use App\Controller\TicketController;
     operations: [
         new GetCollection(),
         new GetCollection(
+            uriTemplate: '/tickets/list',
+            controller: TicketController::class . '::list',
+            name: 'api_tickets_list'
+        ),
+        new GetCollection(
             uriTemplate: '/tickets/available',
             controller: TicketController::class . '::getAvailableTickets',
             name: 'api_tickets_available'

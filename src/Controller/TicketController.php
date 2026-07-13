@@ -49,7 +49,7 @@ class TicketController extends AbstractController
         return new JsonResponse(['ok' => true], 200);
     }
 
-    #[Route('/api/tickets', name: 'tickets_list', methods: ['GET'])]
+    #[Route('/api/tickets/list', name: 'tickets_list', methods: ['GET'])]
     public function list(Request $request): JsonResponse
     {
         $reservationId = $request->query->get('reservation_id');
@@ -68,8 +68,49 @@ class TicketController extends AbstractController
         } else {
             $tickets = $repo->findAll();
         }
+        return $this->Json($tickets);
         $out = array_map([$this, 'mapTicket'], $tickets);
         return new JsonResponse($out, 200);
+    }
+
+    public function validateTicketByQrCode(Request $request): JsonResponse
+    {
+        $body = json_decode($request->getContent(), true) ?? [];
+        $qrCodeToken = $body['qrCodeToken'] ?? null;
+
+        // check if qrCodeToken is provided
+        if (!$qrCodeToken) return new JsonResponse(['error' => 'Missing qrCodeToken'], 400);
+
+        // check if ticket exists and is not already validated
+        $repo = $this->em->getRepository(Ticket::class);
+        $ticket = $repo->findOneBy(['qrCodeToken' => $qrCodeToken]);
+        if (!$ticket) return new JsonResponse(['error' => 'Not found'], 404);
+        if ($ticket->getStatus() === 'embarque') {
+            return new JsonResponse(['error' => 'Ticket already validated'], 400);
+        }
+
+        // check if agent can validate the ticket and the ticket belong to this agency
+        $ticketAgency = $ticket->getReservation()?->getTrip()?->getAgency();
+        $agentRepo = $this->em->getRepository(Agent::class);
+        $agent = $agentRepo->find(['user' => $this->getUser()]);
+
+        if ($ticketAgency && $ticketAgency->getId() !== $agent->getAgent()->getId()) {
+            return new JsonResponse(['error' => 'Ticket does not belong to your agency'], 403);
+        }
+
+        // validate the reservation and set the update for the ticket
+        // $reservation = $ticket->getReservation();
+        // if ($reservation) {
+        //     $reservation->setStatus('validated');
+        //     $this->em->persist($reservation);
+        // }
+
+
+        $ticket->setStatus('embarque');
+        $ticket->setValidatedByAgent($agent);
+        $ticket->setValidatedAt(new \DateTime());
+        $this->em->flush();
+        return new JsonResponse($this->mapTicket($ticket), 200);
     }
 
     #[Route('/api/tickets/{id}', name: 'get_ticket_by_id', methods: ['GET'])]
