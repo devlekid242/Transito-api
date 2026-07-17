@@ -141,6 +141,7 @@ class TicketController extends AbstractController
             'reservationId' => $reservation?->getId(),
             'ticketNumber' => 'TKT-' . $ticket->getId(),
             'passengerName' => $ticket->getPassengerName(),
+            'passengerPhone' => $ticket->getPassengerPhone(),
             'agenceName' => $agenceName,
             'tripNumber' => $trip ? 'TRIP-' . $trip->getId() : null,
             'departureCity' => $trip?->getDepartureCity() ?? $trip?->getDeparturePoint()?->getCity() ?? '',

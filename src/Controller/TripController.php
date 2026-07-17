@@ -38,6 +38,8 @@ class TripController extends AbstractController
         // checher if the user is an agent
         $agency = $this->getAuthenticatedAgency();
 
+        $user = $this->getUser();
+
 
         $qb = $this->tripRepository->createQueryBuilder('t')
             ->leftJoin('t.departurePoint', 'dp')
@@ -50,6 +52,15 @@ class TripController extends AbstractController
             $qb->andWhere('t.agency = :agency')
                 ->setParameter('agency', $agency);
         }
+
+        if ($user instanceof User) {
+            if(!in_array('ROLE_PARTNER', $user->getRoles())) {
+                $qb->andWhere('t.departureTime >= :now')
+                    ->setParameter('now', new \DateTime());
+            }
+        }
+
+        
 
         if ($departureCity) {
             $qb->andWhere(
@@ -104,6 +115,22 @@ class TripController extends AbstractController
             'page' => $page,
             'pageSize' => $limit,
         ]);
+    }
+
+    public function uncoming(Request $request): JsonResponse
+    {
+        $qb = $this->tripRepository->createQueryBuilder('t')
+            ->join('t.agency', 'a')
+            ->join('t.bus', 'b')
+            ->where('t.status = :status')
+            ->setParameter('status', 'planifie')
+            ->andWhere('t.departureTime >= :now')
+            ->setParameter('now', new \DateTime())
+            ->orderBy('t.departureTime', 'ASC');
+
+        $trips = $qb->getQuery()->getResult();
+
+        return $this->json(array_map([$this, 'normalizeTrip'], $trips));
     }
 
     public function detail(int $id): JsonResponse
@@ -513,6 +540,7 @@ class TripController extends AbstractController
 
         return $this->json(array_values($cities));
     }
+
 
     public function popular(): JsonResponse
     {

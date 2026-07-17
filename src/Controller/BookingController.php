@@ -30,19 +30,9 @@ class BookingController extends AbstractController
             return new JsonResponse(['error' => 'Invalid payload'], 400);
         }
 
-        // Check for duplicate booking based on user and trip
-
         $user = $this->getUser();
         $tripId = $data['tripId'] ?? null;
-
-        if ($tripId && $user) {
-            $existingReservation = $reservationRepository->findOneBy(['trip' => $tripId, 'user' => $user, 'paymentStatus' => 'paye']);
-            if ($existingReservation) {
-                return new JsonResponse(['error' => 'A booking for this trip and user already exists'], 409);
-            }
-        }
-
-
+        
         // Required fields from frontend BookingRequest
         $tripId = $data['tripId'] ?? null;
         $passengers = $data['passengers'] ?? [];
@@ -101,7 +91,13 @@ class BookingController extends AbstractController
             $ticket->setQrCodeToken($token);
 
             $this->em->persist($ticket);
-            $createdTickets[] = ['seat' => $ticket->getSeatNumber(), 'qr' => $ticket->getQrCodeToken()];
+            $createdTickets[] = [
+                'seat' => $ticket->getSeatNumber(),
+                'qr' => $ticket->getQrCodeToken(),
+                'passengerName' => $ticket->getPassengerName(),
+                'passengerPhone' => $ticket->getPassengerPhone(),
+                'passengerCni' => $ticket->getPassengerCni(),
+            ];
         }
 
         // update trip seats reserved
@@ -133,6 +129,12 @@ class BookingController extends AbstractController
         if (isset($notification)) {
             $this->notificationBroadcaster->broadcast($notification);
         }
+
+        // Numéro de billet unique par passager, généré une fois l'ID de réservation connu
+        foreach ($createdTickets as &$t) {
+            $t['ticketNumber'] = sprintf('TKT-%d-%03d', $reservation->getId(), $t['seat']);
+        }
+        unset($t);
 
         $response = [
             'id' => $reservation->getId(),
@@ -299,15 +301,33 @@ class BookingController extends AbstractController
         $passengerName = $tickets[0]?->getPassengerName() ?? '';
         $passengerPhone = $tickets[0]?->getPassengerPhone() ?? $reservation->getPaymentPhone();
         $passengerEmail = $user?->getEmail() ?? '';
+        $ticketStatus = $tickets[0]?->getStatus();
 
         $status = 'En attente';
-        switch ($reservation->getPaymentStatus()) {
-            case 'paye':
-                $status = 'Confirmé';
+        if ($trip->getDepartureTime() < new \DateTime()) {
+            $status = 'Expiré';
+        } else {
+            switch ($reservation->getPaymentStatus()) {
+                case 'paye':
+                    $status = 'Confirmé';
+                    break;
+                case 'rembourse':
+                case 'echoue':
+                    $status = 'Annulé';
+                    break;
+            }
+        }
+
+        $finalTicketStatus = '';
+        switch ($ticketStatus) {
+            case 'en_attente':
+                $finalTicketStatus = 'En attente';
                 break;
-            case 'rembourse':
-            case 'echoue':
-                $status = 'Annulé';
+            case 'embarque':
+                $finalTicketStatus = 'Utilisé';
+                break;
+            case 'annule':
+                $finalTicketStatus = 'Annulé';
                 break;
         }
 
@@ -336,6 +356,12 @@ class BookingController extends AbstractController
                 'agencyName' => $trip->getAgency()?->getName(),
                 'pricePerSeat' => (float)$trip->getPrice(),
             ] : null,
+            'tickets' => array_map(fn($ticket) => [
+                'id' => $ticket->getId(),
+                'seatNumber' => $ticket->getSeatNumber(),
+                'qrCodeToken' => $ticket->getQrCodeToken(),
+                'status' => $finalTicketStatus,
+            ], $tickets),
             'createdAt' => $reservation->getCreatedAt()?->format('c'),
             'updatedAt' => $reservation->getCreatedAt()?->format('c'),
         ];

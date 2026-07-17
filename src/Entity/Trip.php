@@ -28,6 +28,12 @@ use Symfony\Component\Validator\Constraints as Assert;
             name: 'api_trips_search'
         ),
         new GetCollection(
+            uriTemplate: '/trips/uncoming',
+            controller: TripController::class . '::uncoming',
+            read: false,
+            name: 'api_trip_uncoming'
+        ),
+        new GetCollection(
             uriTemplate: '/trips/popular',
             controller: TripController::class . '::popular',
             read: false,
