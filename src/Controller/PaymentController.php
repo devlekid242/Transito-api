@@ -145,6 +145,47 @@ class PaymentController extends AbstractController
         return new JsonResponse($methods, 200);
     }
 
+    /**
+     * Liste des transactions de remboursement en attente de traitement par
+     * l'administration, générées automatiquement par BookingController::cancel().
+     * Permet à l'admin de retrouver rapidement les annulations clients à rembourser.
+     */
+    #[Route('/api/payments/refunds/pending', name: 'payments_pending_refunds', methods: ['GET'])]
+    public function pendingRefunds(): JsonResponse
+    {
+        $qb = $this->em->getRepository(PaymentLog::class)->createQueryBuilder('p')
+            ->where('p.status = :status')
+            ->setParameter('status', 'REFUND_PENDING')
+            ->orderBy('p.createdAt', 'ASC');
+
+        $logs = $qb->getQuery()->getResult();
+
+        $out = array_map(function (PaymentLog $l) {
+            $reservation = $l->getReservation();
+            $trip = $reservation?->getTrip();
+            $rawResponse = json_decode($l->getRawResponse() ?? '{}', true);
+
+            return [
+                'paymentLogId' => $l->getId(),
+                'reference' => $l->getReference(),
+                'amount' => $l->getAmount(),
+                'operator' => $l->getOperator(),
+                'reservationId' => $reservation?->getId(),
+                'paymentPhone' => $reservation?->getPaymentPhone(),
+                'trip' => $trip ? [
+                    'departureCity' => $trip->getDepartureCity(),
+                    'arrivalCity' => $trip->getArrivalCity(),
+                    'departureTime' => $trip->getDepartureTime()?->format('c'),
+                ] : null,
+                'reason' => $rawResponse['reason'] ?? null,
+                'requestedAt' => $rawResponse['requested_at'] ?? $l->getCreatedAt()?->format('c'),
+                'createdAt' => $l->getCreatedAt()?->format('c'),
+            ];
+        }, $logs);
+
+        return new JsonResponse($out, 200);
+    }
+
     public function detail(int $id): JsonResponse
 
     {

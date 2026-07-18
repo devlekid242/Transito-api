@@ -24,6 +24,16 @@ class TicketController extends AbstractController
         $repo = $this->em->getRepository(Ticket::class);
         $ticket = $repo->find($id);
         if (!$ticket) return new JsonResponse(['error' => 'Not found'], 404);
+
+        // Un billet annulé (réservation remboursée) est définitivement invalide :
+        // ni scannable, ni validable, quel que soit le canal utilisé.
+        if ($ticket->getStatus() === 'annule') {
+            return new JsonResponse(['error' => 'Ce billet a été annulé et n\'est plus valide.'], 400);
+        }
+        if ($ticket->getStatus() === 'embarque') {
+            return new JsonResponse(['error' => 'Ce billet a déjà été validé.'], 400);
+        }
+
         $ticket->setStatus('embarque');
         $ticket->setValidatedAt(new \DateTime());
         if ($agentId) {
@@ -85,6 +95,12 @@ class TicketController extends AbstractController
         $repo = $this->em->getRepository(Ticket::class);
         $ticket = $repo->findOneBy(['qrCodeToken' => $qrCodeToken]);
         if (!$ticket) return new JsonResponse(['error' => 'Not found'], 404);
+
+        // Un billet annulé n'est plus scannable : la réservation a été remboursée,
+        // le QR code ne doit plus jamais pouvoir embarquer un passager.
+        if ($ticket->getStatus() === 'annule') {
+            return new JsonResponse(['error' => 'Ce billet a été annulé et n\'est plus valide.'], 400);
+        }
         if ($ticket->getStatus() === 'embarque') {
             return new JsonResponse(['error' => 'Ticket already validated'], 400);
         }
@@ -101,7 +117,7 @@ class TicketController extends AbstractController
         // validate the reservation and set the update for the ticket
         // $reservation = $ticket->getReservation();
         // if ($reservation) {
-        //     $reservation->setStatus('validated');
+        //     $reservation->setStatus('utilise');
         //     $this->em->persist($reservation);
         // }
 
@@ -136,6 +152,8 @@ class TicketController extends AbstractController
             'embarque' => 'Utilisé',
             'annule' => 'Annulé',
         ];
+        $isCancelled = $ticket->getStatus() === 'annule';
+
         return [
             'id' => $ticket->getId(),
             'reservationId' => $reservation?->getId(),
@@ -151,9 +169,12 @@ class TicketController extends AbstractController
             'departureDate' => $departureTime ? $departureTime->format('Y-m-d') : null,
             'seatNumber' => (string)$ticket->getSeatNumber(),
             'busLicensePlate' => $trip?->getBus()?->getRegistrationNumber() ?? '',
-            'qrCode' => $ticket->getQrCodeToken(),
+            // Un billet annulé ne doit plus jamais exposer de QR code exploitable.
+            'qrCode' => $isCancelled ? null : $ticket->getQrCodeToken(),
             'price' => $price,
             'status' => $statusMap[$ticket->getStatus()] ?? 'Expiré',
+            'isCancelled' => $isCancelled,
+            'canDisplayDetails' => !$isCancelled,
             'createdAt' => $ticket->getCreatedAt()?->format('c'),
             'updatedAt' => $ticket->getValidatedAt()?->format('c'),
         ];
