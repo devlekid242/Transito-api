@@ -9,6 +9,7 @@
         "ext-iconv": "*",
         "beberlei/doctrineextensions": "^1.5",
         "doctrine/doctrine-migrations-bundle": "^3.7",
+        "kreait/firebase-php": "^7.24",
         "lexik/jwt-authentication-bundle": "^3.2",
         "nelmio/cors-bundle": "^2.6.1",
         "pusher/pusher-php-server": "*",

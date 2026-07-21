@@ -44,6 +44,7 @@ security:
         - { path: ^/api$|^\/api\/docs, roles: PUBLIC_ACCESS }
         - { path: ^/api/contexts, roles: PUBLIC_ACCESS }
         - { path: ^/api, roles: IS_AUTHENTICATED_FULLY }  # Tout le reste nécessite le Token JWT
+        - { path: ^/api/pusher/auth, roles: IS_AUTHENTICATED_FULLY }  # Tout le reste nécessite le Token JWT
 when@test:
     security:
         password_hashers:

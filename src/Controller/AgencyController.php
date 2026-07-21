@@ -30,7 +30,20 @@ class AgencyController extends AbstractController
             return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
         }
 
-        $trips = $tripRepository->findBy(['agency' => $agency], ['departureTime' => 'ASC']);
+        // $trips = $tripRepository->findBy(['agency' => $agency], ['departureTime' => 'ASC']);
+
+        $qb = $tripRepository->createQueryBuilder('t')
+            ->join('t.agency', 'a')
+            ->join('t.bus', 'b')
+            ->where('t.status = :status')
+            ->setParameter('status', 'planifie')
+            ->andWhere('t.departureTime >= :now')
+            ->setParameter('now', new \DateTime())
+            ->andWhere('t.agency = :agency')
+            ->setParameter('agency', $agency)
+            ->orderBy('t.departureTime', 'ASC');
+
+        $trips = $qb->getQuery()->getResult();
 
         return $this->json(array_map([$this, 'normalizeTrip'], $trips));
     }

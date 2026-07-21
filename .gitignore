@@ -9,6 +9,8 @@
 /vendor/
 ###< symfony/framework-bundle ###
 
+config/firebase-service-account.json
+
 ###> lexik/jwt-authentication-bundle ###
 /config/jwt/*.pem
 ###< lexik/jwt-authentication-bundle ###
