@@ -10,6 +10,7 @@ use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Entity\User;
 use App\Service\NotificationBroadcastService;
+use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -26,99 +27,161 @@ class BookingController extends AbstractController
      */
     private const CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE = 24;
 
+    /**
+     * Frais de plateforme standardisés, appliqués à chaque réservation.
+     * Doit rester alignée avec la valeur affichée côté front (booking-form.page.ts).
+     */
+    private const SERVICE_FEE = 500;
+
+    /** Nombre maximum de passagers autorisés sur une seule réservation. */
+    private const MAX_PASSENGERS_PER_BOOKING = 10;
+
     public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
     public function create(Request $request, ReservationRepository $reservationRepository): JsonResponse
     {
+        // --- Authentification obligatoire : une réservation doit toujours être rattachée
+        // à un utilisateur connu du serveur, jamais créée "anonyme" ---
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return new JsonResponse(['error' => 'Vous devez être connecté pour réserver.'], 401);
+        }
+
         $data = json_decode($request->getContent(), true);
         if (!$data) {
             return new JsonResponse(['error' => 'Invalid payload'], 400);
         }
 
-        // Check for duplicate booking based on user and trip
-
-        $user = $this->getUser();
-        $tripId = $data['tripId'] ?? null;
-
-
-
-        // Required fields from frontend BookingRequest
         $tripId = $data['tripId'] ?? null;
         $passengers = $data['passengers'] ?? [];
         $baggages = $data['baggages'] ?? [];
-        $totalPrice = $data['totalPrice'] ?? 0;
+        // NOTE SÉCURITÉ : `totalPrice` envoyé par le client n'est utilisé que pour
+        // information ; le montant réellement facturé est TOUJOURS recalculé
+        // ci-dessous à partir du prix du trajet en base (voir $computedTotal).
+        // Ne jamais faire confiance à un montant transmis par le front.
 
         if (!$tripId) {
             return new JsonResponse(['error' => 'tripId is required'], 400);
         }
 
-        $trip = $this->em->getRepository(Trip::class)->find($tripId);
-        if (!$trip) {
-            return new JsonResponse(['error' => 'Trip not found'], 404);
+        if (!is_array($passengers) || count($passengers) === 0) {
+            return new JsonResponse(['error' => 'Au moins un passager est requis.'], 400);
         }
-
-        // chech if there is stell place disponible.
-
-        $reservation = new Reservation();
-        $user = $this->getUser();
-        if ($user instanceof User) {
-            $reservation->setUser($user);
+        if (count($passengers) > self::MAX_PASSENGERS_PER_BOOKING) {
+            return new JsonResponse(['error' => sprintf('Une réservation est limitée à %d passagers.', self::MAX_PASSENGERS_PER_BOOKING)], 400);
         }
-        $reservation->setTrip($trip);
-        $reservation->setTotalAmount((string)$totalPrice);
-
-        // payment info - try multiple possible incoming keys
-        $paymentPhone = $data['paymentPhone'] ?? $data['buyersPhone'] ?? ($user && method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : '');
-        $reservation->setPaymentPhone($paymentPhone ?: '');
-        $reservation->setPaymentMethod($data['paymentMethod'] ?? 'MTN_MOMO');
-
-        // generate a transaction reference for tracking
-        $reservation->setTransactionReference(uniqid('txn_', true));
-
-        $this->em->persist($reservation);
-
-        // Create tickets for each passenger
-        $createdTickets = [];
-        $seatsReserved = $trip->getSeatsReserved();
         foreach ($passengers as $p) {
-            $ticket = new Ticket();
-            $ticket->setReservation($reservation);
-            $ticket->setPassengerName($p['fullName'] ?? ($p['name'] ?? 'Passager'));
-            $ticket->setPassengerPhone($p['phoneNumber'] ?? $paymentPhone ?? '');
-            $ticket->setPassengerCni($p['identityNumber'] ?? 'N/A');
-
-            // assign next seat number
-            $seatsReserved++;
-            $ticket->setSeatNumber((int)$seatsReserved);
-
-            // unique QR token
-            try {
-                $token = bin2hex(random_bytes(16));
-            } catch (\Exception $e) {
-                $token = uniqid('qrtk_', true);
+            $fullName = trim((string)($p['fullName'] ?? ($p['name'] ?? '')));
+            $phone = trim((string)($p['phoneNumber'] ?? ''));
+            if ($fullName === '' || $phone === '') {
+                return new JsonResponse(['error' => 'Nom complet et numéro de téléphone requis pour chaque passager.'], 400);
             }
-            $ticket->setQrCodeToken($token);
-
-            $this->em->persist($ticket);
-            $createdTickets[] = ['seat' => $ticket->getSeatNumber(), 'qr' => $ticket->getQrCodeToken()];
         }
 
-        // update trip seats reserved
-        $trip->setSeatsReserved((int)$seatsReserved);
-        $this->em->persist($trip);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
 
-        // Create baggage records
-        foreach ($baggages as $b) {
-            $bg = new Baggage();
-            $bg->setReservation($reservation);
-            if (isset($b['weight'])) $bg->setWeight((float)$b['weight']);
-            $bg->setDescription($b['description'] ?? '');
-            $bg->setBaggageType($b['baggageType'] ?? 'Bagage');
-            $this->em->persist($bg);
-        }
+        try {
+            // Verrou pessimiste sur le trajet : empêche deux réservations concurrentes
+            // de dépasser la capacité du bus (race condition sur seatsReserved).
+            $trip = $this->em->getRepository(Trip::class)->find($tripId, LockMode::PESSIMISTIC_WRITE);
+            if (!$trip) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Trip not found'], 404);
+            }
 
-        if ($user instanceof User) {
+            // --- Règles métier appliquées par les agences de transport ---
+            if (in_array($trip->getStatus(), ['annule', 'termine'], true)) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Ce voyage n\'est plus disponible à la réservation.'], 422);
+            }
+            $departureTime = $trip->getDepartureTime();
+            if ($departureTime && $departureTime <= new \DateTime()) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Ce voyage est déjà parti, la réservation est fermée.'], 422);
+            }
+
+            $bus = $trip->getBus();
+            $capacity = $bus ? $bus->getCapacity() : null;
+            $seatsReserved = (int) $trip->getSeatsReserved();
+            $seatsRequested = count($passengers);
+
+            if ($capacity !== null && ($seatsReserved + $seatsRequested) > $capacity) {
+                $connection->rollBack();
+                $remaining = max(0, $capacity - $seatsReserved);
+                return new JsonResponse([
+                    'error' => $remaining > 0
+                        ? sprintf('Il ne reste que %d place(s) disponible(s) sur ce trajet.', $remaining)
+                        : 'Ce trajet est complet.',
+                    'availableSeats' => $remaining,
+                ], 409);
+            }
+
+            // --- Prix recalculé côté serveur : la seule source de vérité ---
+            $pricePerSeat = (float) $trip->getPrice();
+            $computedSubtotal = $pricePerSeat * $seatsRequested;
+            $computedTotal = $computedSubtotal + self::SERVICE_FEE;
+
+            $reservation = new Reservation();
+            $reservation->setUser($user);
+            $reservation->setTrip($trip);
+            $reservation->setTotalAmount((string)$computedTotal);
+
+            $paymentPhone = $data['paymentPhone'] ?? (method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : '');
+            $reservation->setPaymentPhone($paymentPhone ?: '');
+
+            $allowedMethods = ['MTN_MOMO', 'AIRTEL_MONEY'];
+            $paymentMethod = $data['paymentMethod'] ?? null;
+            if (!in_array($paymentMethod, $allowedMethods, true)) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Méthode de paiement invalide.'], 400);
+            }
+            $reservation->setPaymentMethod($paymentMethod);
+            $reservation->setTransactionReference(uniqid('txn_', true));
+
+            $this->em->persist($reservation);
+
+            $createdTickets = [];
+            foreach ($passengers as $p) {
+                $ticket = new Ticket();
+                $ticket->setReservation($reservation);
+                $ticket->setPassengerName(trim((string)($p['fullName'] ?? ($p['name'] ?? 'Passager'))));
+                $ticket->setPassengerPhone(trim((string)($p['phoneNumber'] ?? $paymentPhone ?? '')));
+                $ticket->setPassengerCni($p['identityNumber'] ?? 'N/A');
+
+                $seatsReserved++;
+                $ticket->setSeatNumber($seatsReserved);
+
+                try {
+                    $token = bin2hex(random_bytes(16));
+                } catch (\Exception $e) {
+                    $token = uniqid('qrtk_', true);
+                }
+                $ticket->setQrCodeToken($token);
+
+                $this->em->persist($ticket);
+                $createdTickets[] = [
+                    'seat' => $ticket->getSeatNumber(),
+                    'qr' => $ticket->getQrCodeToken(),
+                    'ticketNumber' => null, // renseigné après flush() une fois l'id du ticket connu
+                ];
+            }
+
+            $trip->setSeatsReserved($seatsReserved);
+            $this->em->persist($trip);
+
+            foreach ($baggages as $b) {
+                $bg = new Baggage();
+                $bg->setReservation($reservation);
+                if (isset($b['weight'])) {
+                    $bg->setWeight((float)$b['weight']);
+                }
+                $bg->setDescription($b['description'] ?? '');
+                $bg->setBaggageType($b['baggageType'] ?? 'Bagage');
+                $this->em->persist($bg);
+            }
+
             $notification = new Notification();
             $notification->setRecipientType('user')
                 ->setRecipientId($user->getId())
@@ -126,21 +189,33 @@ class BookingController extends AbstractController
                 ->setContent(sprintf('Votre réservation pour le trajet %s → %s a été enregistrée. En attente de confirmation du paiement.', $trip->getDepartureCity(), $trip->getArrivalCity()))
                 ->setCategory('BOOKING');
             $this->em->persist($notification);
+
+            $this->em->flush();
+            $connection->commit();
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
         }
 
-        $this->em->flush();
+        $this->notificationBroadcaster->broadcast($notification);
 
-        if (isset($notification)) {
-            $this->notificationBroadcaster->broadcast($notification);
-        }
+        // Complète le numéro de billet maintenant que les tickets ont un id.
+        $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+        $ticketsPayload = array_map(fn(Ticket $t) => [
+            'seat' => $t->getSeatNumber(),
+            'qr' => $t->getStatus() === 'annule' ? null : $t->getQrCodeToken(),
+            'ticketNumber' => 'TKT-' . $t->getId(),
+            'passengerName' => $t->getPassengerName(),
+            'passengerPhone' => $t->getPassengerPhone(),
+        ], $tickets);
 
         $response = [
             'id' => $reservation->getId(),
             'reservationId' => $reservation->getId(),
             'transactionReference' => $reservation->getTransactionReference(),
             'totalAmount' => $reservation->getTotalAmount(),
-            'ticketNumber' => count($createdTickets) === 1 ? ('TKT-' . $reservation->getId()) : null,
-            'tickets' => $createdTickets
+            'ticketNumber' => count($ticketsPayload) === 1 ? ('TKT-' . $reservation->getId()) : null,
+            'tickets' => $ticketsPayload,
         ];
 
         return new JsonResponse($response, 201);
@@ -154,11 +229,38 @@ class BookingController extends AbstractController
             return new Response('Not found', 404);
         }
 
-        // Minimal PDF-like placeholder content (simple text as PDF placeholder)
-        $content = "Receipt for reservation #{$reservation->getId()}\n";
-        $content .= "Passenger: " . ($this->em->getRepository(Ticket::class)->findOneBy(['reservation' => $reservation])?->getPassengerName() ?? 'N/A') . "\n";
-        $content .= "Amount: " . $reservation->getTotalAmount() . "\n";
-        $content .= "Trip ID: " . ($reservation->getTrip()?->getId() ?? 'N/A') . "\n";
+        // --- IDOR : seul le propriétaire de la réservation peut télécharger son reçu ---
+        $user = $this->getUser();
+        if (!$reservation->getUser() || !$user instanceof User || $reservation->getUser()->getId() !== $user->getId()) {
+            return new Response('Accès refusé.', 403);
+        }
+
+        $trip = $reservation->getTrip();
+        $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+        $agencyName = $trip?->getAgency()?->getName() ?? 'N/A';
+        $busPlate = $trip?->getBus()?->getRegistrationNumber() ?? 'N/A';
+        $departureTime = $trip?->getDepartureTime();
+
+        // Reçu enrichi : agence, trajet, date/heure, bus, et un billet par passager.
+        $content = "==== Reçu de réservation ====\n";
+        $content .= "Agence : {$agencyName}\n";
+        $content .= "Réservation N° : {$reservation->getId()}\n";
+        $content .= "Référence transaction : " . ($reservation->getTransactionReference() ?? 'N/A') . "\n";
+        $content .= "Trajet : " . ($trip?->getDepartureCity() ?? 'N/A') . ' → ' . ($trip?->getArrivalCity() ?? 'N/A') . "\n";
+        $content .= "Date de départ : " . ($departureTime ? $departureTime->format('d/m/Y') : 'N/A') . "\n";
+        $content .= "Heure de départ : " . ($departureTime ? $departureTime->format('H:i') : 'N/A') . "\n";
+        $content .= "Bus : {$busPlate}\n";
+        $content .= "Montant total : " . $reservation->getTotalAmount() . " FCFA\n";
+        $content .= "\n-- Passagers --\n";
+        foreach ($tickets as $t) {
+            $content .= sprintf(
+                "Billet %s | Siège %s | %s | %s\n",
+                'TKT-' . $t->getId(),
+                (string)$t->getSeatNumber(),
+                $t->getPassengerName(),
+                $t->getPassengerPhone(),
+            );
+        }
 
         return new Response($content, 200, [
             'Content-Type' => 'application/pdf',
@@ -172,6 +274,12 @@ class BookingController extends AbstractController
         $reservation = $this->em->getRepository(Reservation::class)->find($id);
         if (!$reservation) {
             return new JsonResponse(['error' => 'Not found'], 404);
+        }
+
+        // --- IDOR : un client ne doit voir que ses propres réservations ---
+        $user = $this->getUser();
+        if (!$reservation->getUser() || !$user instanceof User || $reservation->getUser()->getId() !== $user->getId()) {
+            return new JsonResponse(['error' => "Vous n'êtes pas autorisé à consulter cette réservation."], 403);
         }
 
         return new JsonResponse($this->mapReservation($reservation), 200);
@@ -231,7 +339,7 @@ class BookingController extends AbstractController
     {
         $data = json_decode($request->getContent(), true) ?? [];
         $tripId = $data['trip_id'] ?? $data['tripId'] ?? null;
-        $seatNumbers = $data['seat_numbers'] ?? $data['seatNumbers'] ?? $data['seatNumbers'] ?? [];
+        $seatNumbers = $data['seat_numbers'] ?? $data['seatNumbers'] ?? [];
 
         if (!$tripId || !is_array($seatNumbers)) {
             return new JsonResponse(['error' => 'trip_id and seat_numbers are required'], 400);
@@ -305,7 +413,7 @@ class BookingController extends AbstractController
 
         // --- Autorisation : seul le propriétaire de la réservation peut l'annuler ---
         $user = $this->getUser();
-        if ($reservation->getUser() && (!$user instanceof User || $reservation->getUser()->getId() !== $user->getId())) {
+        if (!$reservation->getUser() || !$user instanceof User || $reservation->getUser()->getId() !== $user->getId()) {
             return new JsonResponse(['error' => "Vous n'êtes pas autorisé à annuler cette réservation."], 403);
         }
 
@@ -349,42 +457,39 @@ class BookingController extends AbstractController
         }
 
         // 3) Transaction de remboursement à traiter par l'administration
+        $refundAmount = (float)$reservation->getTotalAmount() - self::SERVICE_FEE;
         $refundLog = new PaymentLog();
         $refundLog->setReservation($reservation);
         $refundLog->setOperator($reservation->getPaymentMethod() ?? 'N/A');
         $refundLog->setReference(uniqid('refund_', true));
-        $refundLog->setAmount($reservation->getTotalAmount() - 500 ?? '0');
+        $refundLog->setAmount((string)$refundAmount);
         $refundLog->setStatus('REFUND_PENDING');
         $refundLog->setRawResponse(json_encode([
             'type' => 'refund_request',
             'reason' => $reason,
             'requested_at' => $now->format('c'),
-            'requested_by_user_id' => $reservation->getUser()->getId(),
+            // $user est garanti non-null ici grâce à la vérification d'autorisation ci-dessus.
+            'requested_by_user_id' => $user->getId(),
             'original_transaction_reference' => $reservation->getTransactionReference(),
         ]));
         $this->em->persist($refundLog);
 
         // 4) Notification au client
-        if ($reservation->getUser()) {
-            $notification = new Notification();
-            $notification->setRecipientType('user')
-                ->setRecipientId($reservation->getUser()->getId())
-                ->setTitle('Réservation annulée')
-                ->setContent(sprintf(
-                    'Votre réservation pour le trajet %s → %s a été annulée. Le remboursement de %s est en cours de traitement par notre équipe.',
-                    $trip->getDepartureCity(),
-                    $trip->getArrivalCity(),
-                    $reservation->getTotalAmount() - 500,
-                ))
-                ->setCategory('BOOKING');
-            $this->em->persist($notification);
-        }
+        $notification = new Notification();
+        $notification->setRecipientType('user')
+            ->setRecipientId($user->getId())
+            ->setTitle('Réservation annulée')
+            ->setContent(sprintf(
+                'Votre réservation pour le trajet %s → %s a été annulée. Le remboursement de %s FCFA est en cours de traitement par notre équipe.',
+                $trip->getDepartureCity(),
+                $trip->getArrivalCity(),
+                $refundAmount,
+            ))
+            ->setCategory('BOOKING');
+        $this->em->persist($notification);
 
         $this->em->flush();
-
-        if (isset($notification)) {
-            $this->notificationBroadcaster->broadcast($notification);
-        }
+        $this->notificationBroadcaster->broadcast($notification);
 
         return new JsonResponse([
             'ok' => true,
@@ -443,6 +548,7 @@ class BookingController extends AbstractController
 
         $departureTime = $trip?->getDepartureTime();
         $departureDate = $departureTime ? $departureTime->format('Y-m-d') : null;
+        $bus = $trip?->getBus();
 
         return [
             'id' => $reservation->getId(),
@@ -466,10 +572,14 @@ class BookingController extends AbstractController
                 'agencyId' => $trip->getAgency()?->getId(),
                 'agencyName' => $trip->getAgency()?->getName(),
                 'pricePerSeat' => (float)$trip->getPrice(),
+                'busLicensePlate' => $bus?->getRegistrationNumber() ?? '',
             ] : null,
             'tickets' => array_map(fn($ticket) => [
                 'id' => $ticket->getId(),
+                'ticketNumber' => 'TKT-' . $ticket->getId(),
                 'seatNumber' => $ticket->getSeatNumber(),
+                'passengerName' => $ticket->getPassengerName(),
+                'passengerPhone' => $ticket->getPassengerPhone(),
                 'qrCodeToken' => $ticket->getStatus() === 'annule' ? null : $ticket->getQrCodeToken(),
                 'status' => $finalTicketStatus,
             ], $tickets),

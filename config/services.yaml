@@ -34,7 +34,7 @@ services:
     Kreait\Firebase\Contract\Messaging:
         factory: ['App\Service\FirebaseMessagingFactory', 'create']
         arguments:
-            - "%env(FIREBASE_CREDENTIALS)%"
+            - "%kernel.project_dir%/%env(FIREBASE_CREDENTIALS)%"
 
     # add more service definitions when explicit configuration is needed
     # please note that last definitions always *replace* previous ones

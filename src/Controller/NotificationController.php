@@ -36,6 +36,21 @@ class NotificationController extends AbstractController
         return $this->json($data);
     }
 
+    /**
+     * Création d'une notification.
+     *
+     * Sécurité : ce endpoint est accessible à tout utilisateur authentifié,
+     * il ne doit donc JAMAIS permettre de notifier quelqu'un d'autre que
+     * soi-même, ni de diffuser à toute l'agence — sinon n'importe quel compte
+     * peut spammer/harceler d'autres utilisateurs (y compris via le push FCM
+     * réellement envoyé sur leur téléphone).
+     *
+     * - recipientType = 'user' : autorisé uniquement pour soi-même, sauf rôle
+     *   privilégié (ex: agent/admin qui notifie un client d'une réservation).
+     * - recipientType = 'agency_all' (broadcast) : réservé aux rôles privilégiés.
+     *
+     * Adapter 'ROLE_ADMIN' / 'ROLE_AGENT' ci-dessous à votre hiérarchie de rôles réelle.
+     */
     #[Route('', name: 'api_notifications_create', methods: ['POST'])]
     public function create(Request $request, EntityManagerInterface $em, NotificationBroadcastService $broadcaster): JsonResponse
     {
@@ -45,7 +60,7 @@ class NotificationController extends AbstractController
         }
 
         $data = json_decode($request->getContent(), true) ?? [];
-        
+
         $title = trim((string)($data['title'] ?? ''));
         $content = trim((string)($data['content'] ?? ''));
         if ($title === '' || $content === '') {
@@ -53,10 +68,29 @@ class NotificationController extends AbstractController
         }
 
         $recipientType = $data['recipientType'] ?? 'user';
+        $requestedRecipientId = isset($data['recipientId']) ? (int)$data['recipientId'] : null;
+
+        $isPrivileged = $this->isGranted('ROLE_ADMIN') || $this->isGranted('ROLE_AGENT');
+
+        // Diffusion à toute l'agence : réservée aux comptes privilégiés.
+        if ($recipientType !== 'user' && !$isPrivileged) {
+            return $this->json(['message' => "Vous n'êtes pas autorisé à diffuser ce type de notification."], Response::HTTP_FORBIDDEN);
+        }
+
+        // Notifier un autre utilisateur que soi-même : réservé aux comptes privilégiés.
+        if (
+            $recipientType === 'user'
+            && $requestedRecipientId !== null
+            && $requestedRecipientId !== $user->getId()
+            && !$isPrivileged
+        ) {
+            return $this->json(['message' => 'Vous ne pouvez créer une notification que pour vous-même.'], Response::HTTP_FORBIDDEN);
+        }
+
         $notification = new Notification();
         $notification->setRecipientType($recipientType);
         $notification->setRecipientId(
-            $recipientType === 'user' ? (isset($data['recipientId']) ? (int)$data['recipientId'] : $user->getId()) : null
+            $recipientType === 'user' ? ($requestedRecipientId ?? $user->getId()) : null
         );
         $notification->setTitle($title);
         $notification->setContent($content);
@@ -65,7 +99,7 @@ class NotificationController extends AbstractController
 
         $em->persist($notification);
         $em->flush();
-        
+
         // Diffusion temps réel + push
         $broadcaster->broadcast($notification);
 
