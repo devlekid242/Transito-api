@@ -5,10 +5,13 @@ namespace App\Controller;
 use App\Entity\Trip;
 use App\Entity\Agency;
 use App\Entity\User;
+use App\Entity\Notification;
+use App\Entity\Reservation;
 use App\Repository\AgentRepository;
 use App\Repository\AgencyPointRepository;
 use App\Repository\BusRepository;
 use App\Repository\TripRepository;
+use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -23,6 +26,7 @@ class TripController extends AbstractController
         private BusRepository $busRepository,
         private AgencyPointRepository $agencyPointRepository,
         private EntityManagerInterface $em,
+        private NotificationBroadcastService $notificationBroadcaster, // 👈 NOUVEAU
     ) {}
 
     public function index(Request $request, AgentRepository $agentRepository): JsonResponse
@@ -301,6 +305,14 @@ class TripController extends AbstractController
             return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
         }
 
+        // 👈 NOUVEAU : capturé AVANT toute modification, pour pouvoir détecter
+        // plus bas si l'agence vient d'annuler le trajet ou d'en changer
+        // l'horaire — les deux cas qui doivent alerter les passagers déjà
+        // réservés. Sans ça, un client apprend l'annulation de son trajet en
+        // se présentant à l'agence, ou pas du tout.
+        $previousStatus = $trip->getStatus();
+        $previousDepartureTime = $trip->getDepartureTime();
+
         $data = json_decode($request->getContent(), true) ?? [];
 
         if (array_key_exists('busId', $data)) {
@@ -437,7 +449,128 @@ class TripController extends AbstractController
         $this->em->persist($trip);
         $this->em->flush();
 
+        // 👈 NOUVEAU : voir notifyAffectedPassengersIfNeeded() plus bas.
+        $this->notifyAffectedPassengersIfNeeded($trip, $previousStatus, $previousDepartureTime);
+
         return $this->json($this->normalizeTrip($trip));
+    }
+
+    /**
+     * 👈 NOUVEAU : c'était le trou le plus critique du système de
+     * notifications — une agence pouvait annuler un trajet ou en changer
+     * l'horaire de départ via cette même route `update()` sans qu'AUCUN des
+     * passagers déjà réservés n'en soit informé.
+     *
+     * - Trajet annulé (`status` -> 'annule') : notifie tous les clients avec
+     *   une réservation active (non remboursée) sur ce trajet.
+     * - Horaire de départ modifié (retard, avancement...) : idem.
+     *
+     * ⚠️ Ceci notifie seulement — ça ne déclenche PAS automatiquement de
+     * remboursement pour les réservations d'un trajet annulé par l'agence
+     * (contrairement à BookingController::cancel(), qui lui crée un
+     * PaymentLog `REFUND_PENDING`). Si l'agence doit pouvoir annuler un
+     * trajet en générant aussi les remboursements côté client, il faut
+     * répliquer cette logique ici — dis-moi si tu veux que je l'ajoute.
+     */
+    private function notifyAffectedPassengersIfNeeded(
+        Trip $trip,
+        string $previousStatus,
+        ?\DateTimeInterface $previousDepartureTime,
+    ): void {
+        $isNowCancelled = $trip->getStatus() === 'annule';
+        $statusJustCancelled = $isNowCancelled && $previousStatus !== 'annule';
+
+        $departureTimeChanged = $previousDepartureTime
+            && $trip->getDepartureTime()
+            && $previousDepartureTime->getTimestamp() !== $trip->getDepartureTime()->getTimestamp();
+
+        if (!$statusJustCancelled && !$departureTimeChanged) {
+            return;
+        }
+
+        $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
+            ->andWhere('r.trip = :trip')
+            ->andWhere('r.paymentStatus != :cancelled')
+            ->setParameter('trip', $trip)
+            ->setParameter('cancelled', 'rembourse')
+            ->getQuery()
+            ->getResult();
+
+        foreach ($reservations as $reservation) {
+            $user = $reservation->getUser();
+            if (!$user) {
+                continue;
+            }
+
+            if ($statusJustCancelled) {
+                $title = 'Trajet annulé';
+                $content = sprintf(
+                    "Votre trajet %s → %s du %s a été annulé par l'agence. Contactez le support pour votre remboursement.",
+                    $trip->getDepartureCity() ?? '',
+                    $trip->getArrivalCity() ?? '',
+                    $trip->getDepartureTime()?->format('d/m/Y à H:i') ?? '',
+                );
+            } else {
+                $title = 'Horaire de trajet modifié';
+                $content = sprintf(
+                    "Le départ de votre trajet %s → %s a été modifié. Nouvel horaire : %s.",
+                    $trip->getDepartureCity() ?? '',
+                    $trip->getArrivalCity() ?? '',
+                    $trip->getDepartureTime()?->format('d/m/Y à H:i') ?? 'à confirmer',
+                );
+            }
+
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($user->getId())
+                ->setTitle($title)
+                ->setContent($content)
+                ->setCategory('TRIP');
+            $this->em->persist($notification);
+            $this->em->flush();
+
+            $this->notificationBroadcaster->broadcast($notification);
+        }
+    }
+
+    /**
+     * 👈 NOUVEAU : notifie les passagers d'un trajet sur le point d'être
+     * supprimé. Contrairement à notifyAffectedPassengersIfNeeded() (qui se
+     * base sur une transition de `status` vers 'annule'), ici il n'y a pas de
+     * "nouveau statut" à comparer — le trajet va simplement disparaître.
+     */
+    private function notifyReservationsOfDeletedTrip(Trip $trip): void
+    {
+        $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
+            ->andWhere('r.trip = :trip')
+            ->andWhere('r.paymentStatus != :cancelled')
+            ->setParameter('trip', $trip)
+            ->setParameter('cancelled', 'rembourse')
+            ->getQuery()
+            ->getResult();
+
+        foreach ($reservations as $reservation) {
+            $user = $reservation->getUser();
+            if (!$user) {
+                continue;
+            }
+
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($user->getId())
+                ->setTitle('Trajet annulé')
+                ->setContent(sprintf(
+                    "Votre trajet %s → %s du %s a été annulé par l'agence. Contactez le support pour votre remboursement.",
+                    $trip->getDepartureCity() ?? '',
+                    $trip->getArrivalCity() ?? '',
+                    $trip->getDepartureTime()?->format('d/m/Y à H:i') ?? '',
+                ))
+                ->setCategory('TRIP');
+            $this->em->persist($notification);
+            $this->em->flush();
+
+            $this->notificationBroadcaster->broadcast($notification);
+        }
     }
 
     public function delete(int $id): JsonResponse
@@ -450,6 +583,13 @@ class TripController extends AbstractController
         if (!$this->isAllowedAgency($trip->getAgency())) {
             return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
         }
+
+        // 👈 NOUVEAU : même trou que sur update() — supprimer un trajet qui a
+        // des réservations actives ne prévenait personne, et les clients
+        // concernés se seraient retrouvés avec un billet pointant vers un
+        // trajet qui n'existe plus. On notifie AVANT suppression (on a
+        // encore besoin des infos du trajet dans le message).
+        $this->notifyReservationsOfDeletedTrip($trip);
 
         $this->em->remove($trip);
         $this->em->flush();

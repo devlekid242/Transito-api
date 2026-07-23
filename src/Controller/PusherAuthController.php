@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Entity\User;
 use Pusher\Pusher;
+use App\Repository\AgentRepository;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -12,6 +13,11 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class PusherAuthController extends AbstractController
 {
+
+    public function __construct(
+        private AgentRepository $agentRepository,
+    ) {}
+
     #[Route('/api/pusher/auth', name: 'api_pusher_auth', methods: ['POST'])]
     public function auth(Request $request, Pusher $pusher): Response
     {
@@ -37,8 +43,40 @@ class PusherAuthController extends AbstractController
         return new Response($signature, Response::HTTP_OK, ['Content-Type' => 'application/json']);
     }
 
+    /**
+     * 👈 CORRIGÉ / COMPLÉTÉ :
+     * - private-user-{id}  : uniquement soi-même (inchangé).
+     * - private-global     : diffusions "vraiment globales" (annonces
+     *   générales) — ouvertes à tout utilisateur authentifié.
+     * - private-agency-{id} : NOUVEAU — réservé aux agents rattachés à CETTE
+     *   agence (app partenaire), ou aux admins. Empêche un agent de l'agence
+     *   B de s'abonner aux notifications internes de l'agence A.
+     *
+     * ⚠️ Adapte `$user->getAgent()?->getAgency()?->getId()` aux vrais noms
+     * de méthodes de tes entités User/Agent/Agency si différents.
+     */
     private function isChannelAllowed(string $channelName, User $user): bool
     {
-        return $channelName === 'private-user-' . $user->getId() || $channelName === 'private-global';
+        if ($channelName === 'private-user-' . $user->getId()) {
+            return true;
+        }
+
+        if ($channelName === 'private-global') {
+            return true;
+        }
+
+        if (str_starts_with($channelName, 'private-agency-')) {
+            if ($this->isGranted('ROLE_ADMIN')) {
+                return true;
+            }
+
+            // get agent
+            $agent = $this->agentRepository->findOneBy(['user' => $user]) ;
+            $agencyId = $agent?->getAgency()?->getId();
+            return $agencyId !== null && $channelName === 'private-agency-' . $agencyId;
+        }
+
+        return false;
     }
+
 }

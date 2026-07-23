@@ -7,6 +7,7 @@ use App\Entity\PaymentLog;
 use App\Entity\Reservation;
 use App\Entity\User;
 use App\Service\NotificationBroadcastService;
+use App\Service\WalletService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -17,7 +18,11 @@ use Symfony\Component\Routing\Attribute\Route;
 class PaymentController extends AbstractController
 {
 
-    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
+    public function __construct(
+        private EntityManagerInterface $em,
+        private NotificationBroadcastService $notificationBroadcaster,
+        private WalletService $walletService,
+    ) {}
 
 
     public function initiate(Request $request): JsonResponse
@@ -48,6 +53,11 @@ class PaymentController extends AbstractController
         $this->em->persist($log);
         $this->em->flush();
 
+        // NB : à ce stade, la réservation est en attente de paiement (payment_status = 'en_attente').
+        // Elle ne doit JAMAIS être comptabilisée dans le chiffre d'affaires ni dans le solde d'une
+        // agence tant que confirm() n'a pas marqué le PaymentLog en SUCCESS. C'était la source de
+        // l'incohérence signalée : des réservations non payées gonflaient les stats du partenaire.
+
         return new JsonResponse([
             'success' => true,
             'transactionId' => $reference,
@@ -67,6 +77,9 @@ class PaymentController extends AbstractController
         $log = $repo->findOneBy(['reference' => $tx]);
         if (!$log) return new JsonResponse(['error' => 'Transaction not found'], 404);
 
+        // Idempotence : si ce paiement est déjà marqué SUCCESS, ne pas re-créditer le portefeuille
+        $alreadyConfirmed = $log->getStatus() === 'SUCCESS';
+
         // Simulate confirmation: mark success unless explicitly failed
         $log->setStatus('SUCCESS');
         $raw = ['confirmed_at' => (new \DateTime())->format('c'), 'payload' => $data];
@@ -77,6 +90,12 @@ class PaymentController extends AbstractController
         if ($reservation) {
             $reservation->setPaymentStatus('paye');
             $this->em->persist($reservation);
+
+            // C'est le SEUL moment où l'agence est créditée : le paiement est confirmé.
+            // WalletService est idempotent, mais on évite l'appel superflu si déjà confirmé.
+            if (!$alreadyConfirmed) {
+                $this->walletService->creditForReservationPayment($reservation);
+            }
         }
 
         if ($reservation?->getUser()) {
@@ -205,7 +224,6 @@ class PaymentController extends AbstractController
     }
 
     public function refund(int $id, Request $request): JsonResponse
-
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
@@ -222,6 +240,10 @@ class PaymentController extends AbstractController
         if ($reservation) {
             $reservation->setPaymentStatus('rembourse');
             $this->em->persist($reservation);
+
+            // Si l'agence avait déjà été créditée pour cette réservation, on retire
+            // le montant net de son portefeuille (voir WalletService::debitForRefund).
+            $this->walletService->debitForRefund($reservation, $reason);
         }
 
         if ($reservation?->getUser()) {
@@ -247,7 +269,6 @@ class PaymentController extends AbstractController
 
 
     public function validateCard(Request $request): JsonResponse
-
     {
         $data = json_decode($request->getContent(), true) ?? [];
         $number = preg_replace('/\s+/', '', ($data['card_number'] ?? ''));
@@ -263,13 +284,11 @@ class PaymentController extends AbstractController
     }
 
     public function transactionStatus(string $transactionId): JsonResponse
-
     {
         $log = $this->em->getRepository(PaymentLog::class)->findOneBy(['reference' => $transactionId]);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
         return new JsonResponse(['transactionId' => $transactionId, 'status' => $log->getStatus(), 'createdAt' => $log->getCreatedAt()?->format('c')], 200);
     }
-
     private function luhnCheck(string $number): bool
     {
         $digits = array_reverse(str_split($number));

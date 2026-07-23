@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Entity\PromoCode;
 use App\Repository\PromoCodeRepository;
+use App\Service\AdminNotificationHelper;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -13,7 +14,11 @@ use Symfony\Component\Routing\Attribute\Route;
 #[Route('/api/promos')]
 class PromoController extends AbstractController
 {
-    public function __construct(private PromoCodeRepository $promoRepository, private EntityManagerInterface $em) {}
+    public function __construct(
+        private PromoCodeRepository $promoRepository,
+        private EntityManagerInterface $em,
+        private AdminNotificationHelper $adminNotifier,
+    ) {}
 
     #[Route('/active', name: 'api_promos_active', methods: ['GET'])]
     public function active(): JsonResponse
@@ -55,6 +60,12 @@ class PromoController extends AbstractController
         ]);
     }
 
+    /**
+     * 👈 NOUVEAU : quand un code promo vient d'atteindre son plafond
+     * d'utilisations (`maxUses`), on prévient les admins pour qu'ils sachent
+     * qu'il faut en créer un nouveau / le désactiver. Avant, cette information
+     * n'était visible qu'en consultant manuellement la liste des codes.
+     */
     #[Route('/apply', name: 'api_promos_apply', methods: ['POST'])]
     public function apply(Request $request): JsonResponse
     {
@@ -73,6 +84,16 @@ class PromoController extends AbstractController
         $promo->incrementUses();
         $this->em->persist($promo);
         $this->em->flush();
+
+        $justExhausted = $promo->getMaxUses() !== null && $promo->getCurrentUses() >= $promo->getMaxUses();
+        if ($justExhausted) {
+            $this->adminNotifier->notifyAdmins(
+                'Code promo épuisé',
+                sprintf('Le code « %s » a atteint son plafond de %d utilisations.', $promo->getCode(), $promo->getMaxUses()),
+                'PROMOTION',
+                ['promoId' => $promo->getId()],
+            );
+        }
 
         return $this->json(['success' => true, 'code' => $promo->getCode()]);
     }

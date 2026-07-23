@@ -110,6 +110,18 @@ class Agency
     #[Groups(['agency:read'])]
     private ?string $ratingCache = '0.00';
 
+    // Taux de commission (%) prélevé par la plateforme sur chaque paiement encaissé
+    // pour le compte de cette agence. Utilisé par WalletService pour calculer le
+    // montant net crédité sur le portefeuille de l'agence.
+    #[ORM\Column(name: 'commission_rate', type: Types::DECIMAL, precision: 5, scale: 2, options: ['default' => '10.00'])]
+    #[Assert\PositiveOrZero(message: "Le taux de commission doit être positif ou nul.")]
+    #[Groups(['agency:read', 'agency:write'])]
+    private string $commissionRate = '10.00';
+
+    #[ORM\OneToOne(mappedBy: 'agency', targetEntity: Wallet::class, cascade: ['persist'])]
+    #[Groups(['agency:read'])]
+    private ?Wallet $wallet = null;
+
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['agency:read'])]
     private ?\DateTimeInterface $createdAt = null;
@@ -283,6 +295,28 @@ class Agency
     public function setRatingCache(?string $ratingCache): static
     {
         $this->ratingCache = $ratingCache;
+        return $this;
+    }
+
+    public function getCommissionRate(): string
+    {
+        return $this->commissionRate;
+    }
+
+    public function setCommissionRate(string $commissionRate): static
+    {
+        $this->commissionRate = $commissionRate;
+        return $this;
+    }
+
+    public function getWallet(): ?Wallet
+    {
+        return $this->wallet;
+    }
+
+    public function setWallet(?Wallet $wallet): static
+    {
+        $this->wallet = $wallet;
         return $this;
     }
 

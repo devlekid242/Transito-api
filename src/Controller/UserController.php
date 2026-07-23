@@ -5,8 +5,10 @@ namespace App\Controller;
 use App\Entity\User;
 use App\Entity\Agent;
 use App\Entity\Agency;
+use App\Entity\Notification;
 use App\Repository\AgencyRepository;
 use App\Repository\AgentRepository;
+use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -17,7 +19,10 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class UserController extends AbstractController
 {
-    public function __construct(private AgentRepository $agentRepository) {}
+    public function __construct(
+        private AgentRepository $agentRepository,
+        private NotificationBroadcastService $notificationBroadcaster,
+    ) {}
 
 
     public function currentUser(AgentRepository $agentRepository): JsonResponse
@@ -54,7 +59,6 @@ class UserController extends AbstractController
             return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
 
-        // Champs obligatoires côté entité (Assert\NotBlank) : on refuse une valeur vide explicite
         $requiredFields = ['fullName', 'phoneNumber', 'villeResidence', 'quartier'];
         foreach ($requiredFields as $field) {
             if (array_key_exists($field, $data) && trim((string) $data[$field]) === '') {
@@ -75,7 +79,6 @@ class UserController extends AbstractController
             $user->setPhoneNumber((string) $data['phoneNumber']);
         }
 
-        // --- Champs auparavant absents du contrôleur ---
         if (array_key_exists('villeResidence', $data)) {
             $user->setVilleResidence((string) $data['villeResidence']);
         }
@@ -88,7 +91,6 @@ class UserController extends AbstractController
         if (array_key_exists('emergencyContactPhone', $data)) {
             $user->setEmergencyContactPhone((string) $data['emergencyContactPhone']);
         }
-        // --- Fin des champs ajoutés ---
 
         if (array_key_exists('prefNotifications', $data)) {
             $user->setPrefNotifications((int) $data['prefNotifications']);
@@ -120,7 +122,6 @@ class UserController extends AbstractController
             return $this->json(['message' => 'Aucun fichier fourni.'], Response::HTTP_BAD_REQUEST);
         }
 
-        // Simple file save logic — in production, use proper file storage service (AWS S3, etc.)
         $uploadsDir = $this->getParameter('kernel.project_dir') . '/public/uploads/profile-photos';
         if (!is_dir($uploadsDir)) {
             mkdir($uploadsDir, 0777, true);
@@ -206,10 +207,30 @@ class UserController extends AbstractController
         return $this->json($staffUsers);
     }
 
+    /**
+     * 👈 CORRIGÉ : deux bugs bloquants ici avant.
+     *
+     * 1. `$agent->setAgentRole($agentData['agentRole'] ?? 'agent_quai')` —
+     *    `$agentData` n'était défini NULLE PART dans la méthode (ni dans le
+     *    payload, ni ailleurs). Ça provoquait une erreur PHP
+     *    "Undefined variable $agentData" à CHAQUE appel de cette route, donc
+     *    la création de staff partenaire était cassée en permanence.
+     *    → remplacé par `$payload['agentRole']`, qui est la vraie source.
+     *
+     * 2. `$agent` n'était déclaré qu'à l'intérieur du `if ($agency)`. Si
+     *    l'agence était introuvable, le `if ($agent)` final référençait une
+     *    variable jamais définie. → `$agent = null` initialisé en amont.
+     *
+     * 👈 NOUVEAU : ajout de deux notifications qui manquaient totalement :
+     * - Le nouvel agent reçoit un message de bienvenue sur son propre
+     *   canal (`private-user-{id}`), visible dès sa première connexion.
+     * - Le reste de l'équipe de l'agence est informé de l'arrivée du
+     *   nouveau collègue via le canal agence (`agency_all` scopé, voir
+     *   NotificationBroadcastService).
+     */
     #[Route('/api/users/staff', name: 'api_users_create_staff', methods: ['POST'])]
     public function createStaff(Request $request, EntityManagerInterface $em, UserPasswordHasherInterface $passwordHasher, AgentRepository $agentRepo): JsonResponse
     {
-        // Only admins may create staff via this endpoint
         if (!$this->isGranted('ROLE_PARTNER')) {
             return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
         }
@@ -218,7 +239,6 @@ class UserController extends AbstractController
         if (!is_array($payload)) {
             return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
-        // return $this->json($payload);
 
         $fullName = $payload['fullName'] ?? null;
         $email = $payload['email'] ?? null;
@@ -231,11 +251,10 @@ class UserController extends AbstractController
             return $this->json(['message' => 'fullName et phoneNumber sont requis.'], Response::HTTP_BAD_REQUEST);
         }
 
-        if(!$villeResidence || !$quartier){
+        if (!$villeResidence || !$quartier) {
             return $this->json(['message' => 'la ville de residence et le quartier sont requis.'], Response::HTTP_BAD_REQUEST);
         }
 
-        // uniqueness checks
         $existing = $em->getRepository(User::class)->findOneBy(['phoneNumber' => $phoneNumber]);
         if ($existing) {
             return $this->json(['message' => 'Un utilisateur avec ce numéro existe déjà.'], Response::HTTP_CONFLICT);
@@ -268,18 +287,47 @@ class UserController extends AbstractController
 
         $em->persist($user);
 
-        $agency = $this->getAuthenticatedAgency($agentRepo);        
+        $agency = $this->getAuthenticatedAgency($agentRepo);
+        $agent = null; // 👈 initialisé ici pour éviter l'undefined variable plus bas
 
         if ($agency) {
             $agent = new Agent();
             $agent->setUser($user);
             $agent->setAgency($agency);
-            $agent->setAgentRole($agentData['agentRole'] ?? 'agent_quai');
+            $agent->setAgentRole($payload['agentRole'] ?? 'agent_quai'); // 👈 corrigé : $payload, pas $agentData
             $agent->setStatus('active');
             $em->persist($agent);
         }
 
         $em->flush();
+
+        // 👈 NOUVEAU : message de bienvenue pour le nouvel agent.
+        $welcomeNotification = new Notification();
+        $welcomeNotification->setRecipientType('user')
+            ->setRecipientId($user->getId())
+            ->setTitle('Bienvenue dans l\'équipe')
+            ->setContent(sprintf(
+                'Votre compte a été créé%s. Connectez-vous avec votre numéro %s.',
+                $agency ? sprintf(' pour l\'agence %s', $agency->getName()) : '',
+                $phoneNumber,
+            ))
+            ->setCategory('INFO');
+        $em->persist($welcomeNotification);
+        $em->flush();
+        $this->notificationBroadcaster->broadcast($welcomeNotification);
+
+        // 👈 NOUVEAU : annonce au reste de l'agence (canal agency_all scopé).
+        if ($agency) {
+            $teamNotification = new Notification();
+            $teamNotification->setRecipientType('agency_all')
+                ->setRecipientId($agency->getId())
+                ->setTitle('Nouveau membre dans l\'équipe')
+                ->setContent(sprintf('%s a rejoint l\'agence.', $fullName))
+                ->setCategory('INFO');
+            $em->persist($teamNotification);
+            $em->flush();
+            $this->notificationBroadcaster->broadcast($teamNotification);
+        }
 
         $res = [
             'id' => $user->getId(),

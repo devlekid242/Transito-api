@@ -6,6 +6,7 @@ use App\Entity\Agency;
 use App\Entity\AgencyDocument;
 use App\Repository\AgencyDocumentRepository;
 use App\Repository\AgentRepository;
+use App\Service\AdminNotificationHelper;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -16,6 +17,8 @@ use Symfony\Component\Routing\Attribute\Route;
 #[Route('/api/agency-documents')]
 class AgencyDocumentController extends AbstractController
 {
+    public function __construct(private AdminNotificationHelper $adminNotifier) {}
+
     #[Route('', name: 'api_agency_documents_list', methods: ['GET'])]
     public function list(
         AgencyDocumentRepository $documentRepository,
@@ -84,6 +87,20 @@ class AgencyDocumentController extends AbstractController
 
         $em->persist($document);
         $em->flush();
+
+        // 👈 NOUVEAU : un document d'agence uploadé (souvent un justificatif
+        // légal soumis à validation) ne déclenchait aucune alerte — il fallait
+        // qu'un admin pense à vérifier manuellement la liste des documents.
+        $this->adminNotifier->notifyAdmins(
+            'Nouveau document d\'agence à valider',
+            sprintf(
+                'L\'agence « %s » a soumis un document : « %s ».',
+                $agent->getAgency()->getName(),
+                $document->getName(),
+            ),
+            'AGENCY_DOCUMENT',
+            ['documentId' => $document->getId(), 'agencyId' => $agent->getAgency()->getId()],
+        );
 
         return $this->json($this->normalizeDocument($document), Response::HTTP_CREATED);
     }

@@ -6,10 +6,14 @@ use App\Entity\Agency;
 use App\Entity\AgencyPoint;
 use App\Entity\Agent;
 use App\Entity\Bus;
+use App\Entity\PaymentLog;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Entity\User;
+use App\Entity\Wallet;
+use App\Entity\WalletTransaction;
+use App\Entity\WithdrawalRequest;
 use Doctrine\Bundle\FixturesBundle\Fixture;
 use Doctrine\Persistence\ObjectManager;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
@@ -35,6 +39,16 @@ class DemoFixtures extends Fixture
         $agency1->setPasswordHash($this->passwordHasher->hashPassword(new User(), 'Transito2026!'));
         $agency1->setStatus('active');
         $manager->persist($agency1);
+
+        $wallet1 = new Wallet();
+        $wallet1->setAgency($agency1);
+        $wallet1->setType(Wallet::TYPE_AGENCY);
+        $wallet1->setAvailableBalance('0.00');
+        $wallet1->setReservedBalance('0.00');
+        $wallet1->setTotalEarned('0.00');
+        $wallet1->setTotalWithdrawn('0.00');
+        $agency1->setWallet($wallet1);
+        $manager->persist($wallet1);
 
         $point11 = new AgencyPoint();
         $point11->setAgency($agency1);
@@ -272,8 +286,70 @@ class DemoFixtures extends Fixture
         $ticket1->setPassengerCni('CG123456789');
         $ticket1->setSeatNumber(12);
         $ticket1->setQrCodeToken('QR-TRIP1-001');
-        $ticket1->setStatus('en_attente');
+        $ticket1->setStatus('embarque');
         $manager->persist($ticket1);
+
+        $paymentLog1 = new PaymentLog();
+        $paymentLog1->setReservation($reservation1);
+        $paymentLog1->setOperator('MTN');
+        $paymentLog1->setReference('PMT-2026-0001');
+        $paymentLog1->setAmount('25000.00');
+        $paymentLog1->setStatus('SUCCESS');
+        $manager->persist($paymentLog1);
+
+        $wallet1->setAvailableBalance('24500.00');
+        $wallet1->setTotalEarned('24500.00');
+
+        $transaction1 = new WalletTransaction();
+        $transaction1->setWallet($wallet1);
+        $transaction1->setType(WalletTransaction::TYPE_CREDIT);
+        $transaction1->setSource(WalletTransaction::SOURCE_RESERVATION_PAYMENT);
+        $transaction1->setAmount('24500.00');
+        $transaction1->setFeeAmount('500.00');
+        $transaction1->setBalanceAfter('24500.00');
+        $transaction1->setReservation($reservation1);
+        $transaction1->setDescription('Paiement réservation #1 (net après frais plateforme)');
+        $manager->persist($transaction1);
+
+        $platformWallet = new Wallet();
+        $platformWallet->setType(Wallet::TYPE_PLATFORM);
+        $platformWallet->setAvailableBalance('500.00');
+        $platformWallet->setReservedBalance('0.00');
+        $platformWallet->setTotalEarned('500.00');
+        $platformWallet->setTotalWithdrawn('0.00');
+        $manager->persist($platformWallet);
+
+        $platformFeeTx = new WalletTransaction();
+        $platformFeeTx->setWallet($platformWallet);
+        $platformFeeTx->setType(WalletTransaction::TYPE_CREDIT);
+        $platformFeeTx->setSource(WalletTransaction::SOURCE_PLATFORM_FEE);
+        $platformFeeTx->setAmount('500.00');
+        $platformFeeTx->setBalanceAfter('500.00');
+        $platformFeeTx->setReservation($reservation1);
+        $platformFeeTx->setDescription('Commission plateforme réservation #1');
+        $manager->persist($platformFeeTx);
+
+        $withdrawal1 = new WithdrawalRequest();
+        $withdrawal1->setAgency($agency1);
+        $withdrawal1->setRequestedBy($agency1User);
+        $withdrawal1->setAmount('10000.00');
+        $withdrawal1->setMethod('Mobile Money');
+        $withdrawal1->setStatus('pending');
+        $withdrawal1->setNotes('Demande de retrait de test');
+        $manager->persist($withdrawal1);
+
+        $wallet1->setAvailableBalance('14500.00');
+        $wallet1->setReservedBalance('10000.00');
+
+        $withdrawalHold = new WalletTransaction();
+        $withdrawalHold->setWallet($wallet1);
+        $withdrawalHold->setType(WalletTransaction::TYPE_DEBIT);
+        $withdrawalHold->setSource(WalletTransaction::SOURCE_WITHDRAWAL_HOLD);
+        $withdrawalHold->setAmount('10000.00');
+        $withdrawalHold->setBalanceAfter('14500.00');
+        $withdrawalHold->setWithdrawalRequest($withdrawal1);
+        $withdrawalHold->setDescription('Fonds réservés pour demande de retrait');
+        $manager->persist($withdrawalHold);
 
         $reservation2 = new Reservation();
         $reservation2->setUser($client2);

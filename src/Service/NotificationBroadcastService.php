@@ -25,7 +25,6 @@ class NotificationBroadcastService
             return;
         }
 
-        // On utilise le normalizer pour avoir la même data partout !
         $payload = $this->normalizer->normalize($notification);
 
         // 1) Temps réel in-app via Pusher
@@ -43,6 +42,21 @@ class NotificationBroadcastService
         }
     }
 
+    /**
+     * 👈 CORRIGÉ : `agency_all` était toujours routé vers `private-global`,
+     * un canal unique partagé par TOUT LE MONDE (clients + partenaires de
+     * TOUTES les agences confondues). Concrètement une annonce destinée aux
+     * agents de l'agence A finissait aussi chez les clients et chez les
+     * agents de l'agence B.
+     *
+     * Désormais :
+     * - `agency_all` + recipientId renseigné (= l'agencyId) → canal scopé
+     *   `private-agency-{agencyId}`, réservé aux agents de cette agence
+     *   (voir PusherAuthController::isChannelAllowed).
+     * - `agency_all` SANS recipientId → conservé comme diffusion "vraiment
+     *   globale" (`private-global`), réservée aux admins côté
+     *   NotificationController::create().
+     */
     private function resolveChannel(Notification $notification): ?string
     {
         if ($notification->getRecipientType() === 'user' && $notification->getRecipientId() !== null) {
@@ -50,7 +64,9 @@ class NotificationBroadcastService
         }
 
         if ($notification->getRecipientType() === 'agency_all') {
-            return 'private-global';
+            return $notification->getRecipientId() !== null
+                ? 'private-agency-' . $notification->getRecipientId()
+                : 'private-global';
         }
 
         return null;

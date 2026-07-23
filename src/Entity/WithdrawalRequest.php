@@ -7,6 +7,8 @@ use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
 use App\Controller\Partner\PartnerFinanceController;
+use App\Controller\Admin\AdminWithdrawalController;
+use App\Entity\Agency;
 use App\Entity\User;
 use App\Repository\WithdrawalRequestRepository;
 use Doctrine\DBAL\Types\Types;
@@ -32,10 +34,23 @@ use Symfony\Component\Validator\Constraints as Assert;
             controller: PartnerFinanceController::class . '::getWithdrawal',
             name: 'api_partner_withdrawals_detail'
         ),
-        new Get(
+        new GetCollection(
             uriTemplate: '/partner/withdrawals',
             controller: PartnerFinanceController::class . '::listWithdrawals',
             name: 'api_partner_withdrawals_list'
+        ),
+        // Traitement admin : ces deux routes finalisent (ou annulent) le blocage
+        // de fonds effectué à la création de la demande. Brancher un contrôle de
+        // rôle (super-admin) avant mise en production — voir TODO dans le contrôleur.
+        new Post(
+            uriTemplate: '/admin/withdrawals/{id}/approve',
+            controller: AdminWithdrawalController::class . '::approve',
+            name: 'api_admin_withdrawals_approve'
+        ),
+        new Post(
+            uriTemplate: '/admin/withdrawals/{id}/reject',
+            controller: AdminWithdrawalController::class . '::reject',
+            name: 'api_admin_withdrawals_reject'
         )
     ]
 )]
@@ -47,10 +62,20 @@ class WithdrawalRequest
     #[Groups(['withdrawal:read'])]
     private ?int $id = null;
 
-    #[ORM\ManyToOne(targetEntity: User::class)]
-    #[ORM\JoinColumn(name: 'user_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    // L'agence propriétaire du portefeuille débité. Tous les agents d'une même
+    // agence (admin_agence ou agent_quai) partagent donc le même historique de
+    // retraits, puisque c'est l'agence — et non l'agent — qui possède les fonds.
+    #[ORM\ManyToOne(targetEntity: Agency::class)]
+    #[ORM\JoinColumn(name: 'agency_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
     #[Groups(['withdrawal:read'])]
-    private ?User $user = null;
+    private ?Agency $agency = null;
+
+    // L'utilisateur (agent) qui a initié la demande — traçabilité uniquement,
+    // n'est plus utilisé pour retrouver le solde ou l'historique.
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'requested_by_user_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[Groups(['withdrawal:read'])]
+    private ?User $requestedBy = null;
 
     #[ORM\Column(type: Types::DECIMAL, precision: 10, scale: 2)]
     #[Assert\NotBlank(message: 'Le montant est obligatoire.')]
@@ -63,6 +88,7 @@ class WithdrawalRequest
     #[Groups(['withdrawal:read', 'withdrawal:write'])]
     private ?string $method = null;
 
+    // pending | approved | rejected
     #[ORM\Column(length: 50)]
     #[Groups(['withdrawal:read'])]
     private ?string $status = 'pending';
@@ -70,6 +96,15 @@ class WithdrawalRequest
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     #[Groups(['withdrawal:read', 'withdrawal:write'])]
     private ?string $notes = null;
+
+    // Renseigné par l'admin lors de l'approbation ou du rejet
+    #[ORM\Column(name: 'admin_note', type: Types::TEXT, nullable: true)]
+    #[Groups(['withdrawal:read'])]
+    private ?string $adminNote = null;
+
+    #[ORM\Column(name: 'processed_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    #[Groups(['withdrawal:read'])]
+    private ?\DateTimeInterface $processedAt = null;
 
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['withdrawal:read'])]
@@ -85,14 +120,25 @@ class WithdrawalRequest
         return $this->id;
     }
 
-    public function getUser(): ?User
+    public function getAgency(): ?Agency
     {
-        return $this->user;
+        return $this->agency;
     }
 
-    public function setUser(?User $user): static
+    public function setAgency(?Agency $agency): static
     {
-        $this->user = $user;
+        $this->agency = $agency;
+        return $this;
+    }
+
+    public function getRequestedBy(): ?User
+    {
+        return $this->requestedBy;
+    }
+
+    public function setRequestedBy(?User $requestedBy): static
+    {
+        $this->requestedBy = $requestedBy;
         return $this;
     }
 
@@ -137,6 +183,28 @@ class WithdrawalRequest
     public function setNotes(?string $notes): static
     {
         $this->notes = $notes;
+        return $this;
+    }
+
+    public function getAdminNote(): ?string
+    {
+        return $this->adminNote;
+    }
+
+    public function setAdminNote(?string $adminNote): static
+    {
+        $this->adminNote = $adminNote;
+        return $this;
+    }
+
+    public function getProcessedAt(): ?\DateTimeInterface
+    {
+        return $this->processedAt;
+    }
+
+    public function setProcessedAt(?\DateTimeInterface $processedAt): static
+    {
+        $this->processedAt = $processedAt;
         return $this;
     }
 

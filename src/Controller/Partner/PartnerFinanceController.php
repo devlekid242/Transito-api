@@ -2,14 +2,20 @@
 
 namespace App\Controller\Partner;
 
+use App\Entity\Agency;
 use App\Entity\PaymentLog;
 use App\Entity\Reservation;
+use App\Entity\Ticket;
+use App\Entity\Wallet;
+use App\Entity\WalletTransaction;
 use App\Entity\WithdrawalRequest;
 use App\Entity\User;
 use App\Entity\Agent;
 use App\Entity\Trip;
 use App\Repository\PaymentLogRepository;
-use App\Repository\WithdrawalRequestRepository;
+use App\Repository\AgentRepository;
+use App\Repository\TicketRepository;
+use App\Service\WalletService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -22,13 +28,15 @@ class PartnerFinanceController extends AbstractController
     public function __construct(
         private EntityManagerInterface $em,
         private PaymentLogRepository $paymentLogRepository,
-        private WithdrawalRequestRepository $withdrawalRepository
+        private AgentRepository $agentRepository,
+        private WalletService $walletService,
+        private TicketRepository $ticketRepository
     ) {}
 
     /**
      * Récupère l'agence associée à l'utilisateur courant (Agent)
      */
-    private function getAgencyForUser(User $user)
+    private function getAgencyForUser(User $user): ?Agency
     {
         $agent = $this->em->getRepository(Agent::class)->findOneBy(['user' => $user]);
         if (!$agent) {
@@ -45,19 +53,18 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        // Récupérer l'agence de l'utilisateur (Agent)
         $agency = $this->getAgencyForUser($user);
         if (!$agency) {
             return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
         }
 
+        $wallet = $this->walletService->getOrCreateWallet($agency);
+
         // Récupérer tous les trajets de cette agence
         $trips = $this->em->getRepository(Trip::class)->findBy(['agency' => $agency]);
         $tripIds = array_map(fn(Trip $t) => $t->getId(), $trips);
 
-        // Récupérer toutes les réservations pour les trajets de cette agence
         if (empty($tripIds)) {
-            // Si pas de trajets, retourner des stats vides
             $reservations = [];
         } else {
             $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
@@ -67,54 +74,94 @@ class PartnerFinanceController extends AbstractController
                 ->getResult();
         }
 
-        $totalRevenue = 0.0;
         $totalTrips = count($trips);
         $totalPassengers = 0;
-        $balanceAvailable = 0.0;
-        $balancePending = 0.0;
-        $pendingWithdrawals = 0;
+        $grossRevenue = 0.0;
 
         foreach ($reservations as $reservation) {
-            $totalRevenue += (float) $reservation->getTotalAmount();
             $totalPassengers += count($reservation->getTickets() ?? []);
             if ($reservation->getPaymentStatus() === 'paye') {
-                $balanceAvailable += (float) $reservation->getTotalAmount();
-            } else {
-                $balancePending += (float) $reservation->getTotalAmount();
+                $grossRevenue += (float) $reservation->getTotalAmount();
             }
         }
 
-        $withdrawals = $this->withdrawalRepository->findByUser($user);
-        foreach ($withdrawals as $withdrawal) {
-            if ($withdrawal->getStatus() === 'pending') {
-                $pendingWithdrawals++;
-            }
-            if ($withdrawal->getStatus() === 'approved') {
-                $balanceAvailable -= (float) $withdrawal->getAmount();
-            }
+        $balanceAvailable = (float) $wallet->getAvailableBalance();
+        $balancePending = (float) $wallet->getReservedBalance();
+
+        $reservationIds = array_map(fn(Reservation $r) => $r->getId(), $reservations);
+        if (empty($reservationIds)) {
+            $platformFees = 0.0;
+        } else {
+            $platformFees = (float) $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
+                ->select('COALESCE(SUM(wt.amount), 0) as total')
+                ->join('wt.wallet', 'w')
+                ->where('wt.source = :source')
+                ->andWhere('wt.reservation IN (:reservationIds)')
+                ->andWhere('w.type = :platformType')
+                ->setParameter('source', WalletTransaction::SOURCE_PLATFORM_FEE)
+                ->setParameter('reservationIds', $reservationIds)
+                ->setParameter('platformType', Wallet::TYPE_PLATFORM)
+                ->getQuery()
+                ->getSingleScalarResult();
+            $platformFees = round($platformFees, 2);
         }
 
-        // Transactions récentes pour les réservations de cette agence
-        $recentTransactions = $this->paymentLogRepository->createQueryBuilder('p')
-            ->join('p.reservation', 'r')
+        $netRevenue = max(0.0, round($grossRevenue - $platformFees, 2));
+
+        $ticketStats = $this->em->getRepository(Ticket::class)->createQueryBuilder('tk')
+            ->select('SUM(CASE WHEN tk.status = :boarded THEN 1 ELSE 0 END) as boardedCount, COUNT(tk.id) as totalCount')
+            ->join('tk.reservation', 'r')
             ->join('r.trip', 't')
             ->where('t.agency = :agency')
             ->setParameter('agency', $agency)
-            ->orderBy('p.createdAt', 'DESC')
+            ->setParameter('boarded', 'embarque')
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        $boardedCount = (int) ($ticketStats['boardedCount'] ?? 0);
+        $ticketCount = (int) ($ticketStats['totalCount'] ?? 0);
+        $boardingRate = $ticketCount > 0 ? round(($boardedCount / $ticketCount) * 100, 2) : 0.0;
+
+        $pendingWithdrawals = $this->em->getRepository(WithdrawalRequest::class)->count([
+            'agency' => $agency,
+            'status' => 'pending',
+        ]);
+
+        // Historique des mouvements du portefeuille (remplace l'ancien historique basé
+        // uniquement sur les PaymentLog, qui ne reflétait ni les remboursements, ni les
+        // retraits, ni la commission plateforme).
+        $ledgerEntries = $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
+            ->where('wt.wallet = :wallet')
+            ->setParameter('wallet', $wallet)
+            ->orderBy('wt.createdAt', 'DESC')
             ->setMaxResults(5)
             ->getQuery()
             ->getResult();
 
-        $recentActivity = array_map(function (PaymentLog $log) {
+        $recentActivity = array_map(function (WalletTransaction $tx) {
+            $signedAmount = $tx->getType() === WalletTransaction::TYPE_CREDIT
+                ? (float) $tx->getAmount()
+                : -1 * (float) $tx->getAmount();
+
+            $status = $tx->getSource() === WalletTransaction::SOURCE_WITHDRAWAL_HOLD
+                ? 'En cours'
+                : 'Terminé';
+
             return [
-                'id' => $log->getId(),
-                'description' => sprintf('Paiement %s via %s', $log->getStatus(), $log->getOperator()),
-                'amount' => $log->getAmount(),
-                'status' => $log->getStatus(),
-                'reference' => $log->getReference(),
-                'createdAt' => $log->getCreatedAt()?->format('c'),
+                'id' => $tx->getId(),
+                'description' => $tx->getDescription(),
+                'amount' => $signedAmount,
+                'status' => $status,
+                'reservationId' => $tx->getReservation()?->getId(),
+                'withdrawalId' => $tx->getWithdrawalRequest()?->getId(),
+                'createdAt' => $tx->getCreatedAt()?->format('c'),
             ];
-        }, $recentTransactions);
+        }, $ledgerEntries);
+
+        $withdrawals = $this->em->getRepository(WithdrawalRequest::class)->findBy(
+            ['agency' => $agency],
+            ['createdAt' => 'DESC']
+        );
 
         $dailyTotals = [];
         $today = new \DateTimeImmutable();
@@ -123,14 +170,16 @@ class PartnerFinanceController extends AbstractController
             $dailyTotals[$date->format('Y-m-d')] = 0.0;
         }
 
-        // Transactions par jour pour cette agence
+        // Transactions par jour pour cette agence (uniquement les paiements confirmés)
         $transactionsByDay = $this->paymentLogRepository->createQueryBuilder('p')
             ->select('DATE(p.createdAt) as day, SUM(p.amount) as total')
             ->join('p.reservation', 'r')
             ->join('r.trip', 't')
             ->where('t.agency = :agency')
+            ->andWhere('p.status = :status')
             ->andWhere('p.createdAt >= :start')
             ->setParameter('agency', $agency)
+            ->setParameter('status', 'SUCCESS')
             ->setParameter('start', $today->sub(new \DateInterval('P5D'))->setTime(0, 0, 0))
             ->groupBy('day')
             ->getQuery()
@@ -163,10 +212,13 @@ class PartnerFinanceController extends AbstractController
         $savedReports = $this->buildSavedReports($user);
 
         return new JsonResponse([
-            'revenue' => $totalRevenue,
+            'revenue' => $grossRevenue,
+            'netRevenue' => $netRevenue,
+            'platformFees' => $platformFees,
             'revenueChange' => '0%',
             'activeTrips' => $totalTrips,
             'totalPassengers' => $totalPassengers,
+            'boardingRate' => $boardingRate,
             'balance' => [
                 'available' => $balanceAvailable,
                 'pending' => $balancePending,
@@ -305,7 +357,6 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        // Récupérer l'agence
         $agency = $this->getAgencyForUser($user);
         if (!$agency) {
             return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
@@ -327,57 +378,51 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Méthode de retrait requise.'], Response::HTTP_BAD_REQUEST);
         }
 
-        // Calculer le solde disponible basé sur les trajets et réservations de l'agence
-        $trips = $this->em->getRepository(Trip::class)->findBy(['agency' => $agency]);
-        $tripIds = array_map(fn(Trip $t) => $t->getId(), $trips);
+        $wallet = $this->walletService->getOrCreateWallet($agency);
+        $available = (float) $wallet->getAvailableBalance();
 
-        $balanceAvailable = 0.0;
-        if (!empty($tripIds)) {
-            $reservations = $this->em->getRepository(Reservation::class)->createQueryBuilder('r')
-                ->where('r.trip IN (:tripIds)')
-                ->andWhere('r.paymentStatus = :paid')
-                ->setParameter('tripIds', $tripIds)
-                ->setParameter('paid', 'paye')
-                ->getQuery()
-                ->getResult();
-
-            foreach ($reservations as $reservation) {
-                $balanceAvailable += (float) $reservation->getTotalAmount();
-            }
-        }
-
-        // Déduire les retraits approuvés
-        $withdrawals = $this->withdrawalRepository->findByUser($user);
-        foreach ($withdrawals as $w) {
-            if ($w->getStatus() === 'approved') {
-                $balanceAvailable -= (float) $w->getAmount();
-            }
-        }
-
-        if ($amount > $balanceAvailable) {
+        if ($amount > $available) {
             return new JsonResponse([
                 'message' => 'Solde insuffisant.',
-                'available' => $balanceAvailable,
+                'available' => $available,
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        // return $this->json($method[0]);
-
         $withdrawal = new WithdrawalRequest();
-        $withdrawal->setUser($user);
-        $withdrawal->setAmount((string)$amount);
-        $withdrawal->setMethod($method[0]);
+        $withdrawal->setAgency($agency);
+        $withdrawal->setRequestedBy($user);
+        $withdrawal->setAmount((string) $amount);
+        // NB : $method était auparavant tronqué à son premier caractère ($method[0]) — corrigé ici.
+        $withdrawal->setMethod((string) $method);
         $withdrawal->setNotes($notes);
         $withdrawal->setStatus('pending');
 
         $this->em->persist($withdrawal);
         $this->em->flush();
 
+        try {
+            // Bloque immédiatement les fonds : tant que l'admin n'a pas statué, ce montant
+            // n'est plus disponible pour une autre demande de retrait de la même agence.
+            $this->walletService->reserveForWithdrawal($withdrawal);
+        } catch (\RuntimeException $e) {
+            // Cas rare de concurrence (deux demandes envoyées au même instant) :
+            // on annule la demande plutôt que de laisser un retrait non couvert par le solde.
+            $this->em->remove($withdrawal);
+            $this->em->flush();
+            return new JsonResponse([
+                'message' => $e->getMessage(),
+                'available' => (float) $wallet->getAvailableBalance(),
+            ], Response::HTTP_CONFLICT);
+        }
+
+        $this->em->flush();
+
         return new JsonResponse([
             'success' => true,
             'withdrawalId' => $withdrawal->getId(),
             'status' => $withdrawal->getStatus(),
-            'available' => $balanceAvailable - (float)$withdrawal->getAmount(),
+            'available' => (float) $wallet->getAvailableBalance(),
+            'pending' => (float) $wallet->getReservedBalance(),
         ], Response::HTTP_CREATED);
     }
 
@@ -388,7 +433,16 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $withdrawals = $this->withdrawalRepository->findByUser($user);
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $withdrawals = $this->em->getRepository(WithdrawalRequest::class)->findBy(
+            ['agency' => $agency],
+            ['createdAt' => 'DESC']
+        );
+
         return new JsonResponse(array_map(function (WithdrawalRequest $w) {
             return [
                 'id' => $w->getId(),
@@ -396,6 +450,8 @@ class PartnerFinanceController extends AbstractController
                 'method' => $w->getMethod(),
                 'status' => $w->getStatus(),
                 'notes' => $w->getNotes(),
+                'adminNote' => $w->getAdminNote(),
+                'processedAt' => $w->getProcessedAt()?->format('c'),
                 'createdAt' => $w->getCreatedAt()?->format('c'),
             ];
         }, $withdrawals), Response::HTTP_OK);
@@ -408,8 +464,13 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $withdrawal = $this->withdrawalRepository->find($id);
-        if (!$withdrawal || $withdrawal->getUser()->getId() !== $user->getId()) {
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $withdrawal = $this->em->getRepository(WithdrawalRequest::class)->find($id);
+        if (!$withdrawal || $withdrawal->getAgency()?->getId() !== $agency->getId()) {
             return new JsonResponse(['message' => 'Non trouvé.'], Response::HTTP_NOT_FOUND);
         }
 
@@ -419,6 +480,8 @@ class PartnerFinanceController extends AbstractController
             'method' => $withdrawal->getMethod(),
             'status' => $withdrawal->getStatus(),
             'notes' => $withdrawal->getNotes(),
+            'adminNote' => $withdrawal->getAdminNote(),
+            'processedAt' => $withdrawal->getProcessedAt()?->format('c'),
             'createdAt' => $withdrawal->getCreatedAt()?->format('c'),
         ], Response::HTTP_OK);
     }
@@ -431,7 +494,6 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        // Récupérer l'agence
         $agency = $this->getAgencyForUser($user);
         if (!$agency) {
             return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
@@ -466,7 +528,6 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        // Récupérer l'agence
         $agency = $this->getAgencyForUser($user);
         if (!$agency) {
             return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
@@ -505,5 +566,67 @@ class PartnerFinanceController extends AbstractController
             'data' => array_values($series),
             'totalRevenue' => array_sum($series),
         ], Response::HTTP_OK);
+    }
+
+       /**
+     * Récupère les réservations récentes de l'agent (pour le dashboard)
+     * Routes: /api/statistics/agent/recent-bookings ou /api/bookings/recent
+     */
+    #[Route('/api/agency/recent-bookings', name: 'agency_recent_bookings', methods: ['GET'])]
+    public function getRecentBookings(Request $request): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user) {
+            return new JsonResponse(['error' => 'Unauthorized'], 401);
+        }
+
+        $agent = $this->agentRepository->findOneBy(['user' => $user]);
+        if (!$agent || !$agent->getAgency()) {
+            return new JsonResponse(['error' => 'Agent or Agency not found'], 404);
+        }
+
+        $limit = $request->query->getInt('limit', 10);
+
+        // CORRECTION ICI : On sélectionne UNIQUEMENT 'r' pour garantir un tableau d'objets Reservation
+        $qb = $this->em->createQueryBuilder()
+            ->select('r')
+            ->from(Reservation::class, 'r')
+            ->join('r.trip', 't')
+            ->leftJoin(Ticket::class, 'tk', 'WITH', 'tk.reservation = r')
+            ->where('t.agency = :agency')
+            ->orderBy('r.createdAt', 'DESC')
+            ->setMaxResults($limit)
+            ->setParameter('agency', $agent->getAgency());
+
+        $reservations = $qb->getQuery()->getResult();
+
+        $bookingsData = array_map(function (Reservation $reservation) {
+            $trip = $reservation->getTrip();
+
+            // Recherche du ticket lié
+            $ticket = $this->ticketRepository->findOneBy(['reservation' => $reservation]);
+
+            return [
+                'id' => $reservation->getId(),
+                'passengerName' => $ticket?->getPassengerName() ?? 'N/A',
+                'passengerPhone' => $ticket?->getPassengerPhone() ?? 'N/A',
+                'route' => $trip->getDepartureCity() . ' → ' . $trip->getArrivalCity(),
+                'departureCity' => $trip->getDepartureCity(),
+                'arrivalCity' => $trip->getArrivalCity(),
+                'departureTime' => $trip->getDepartureTime()?->format('c'),
+                'estimatedArrivalTime' => $trip->getEstimatedArrivalTime()?->format('c'),
+                'seatNumber' => $ticket?->getSeatNumber() ?? 'N/A',
+                'ticketCode' => $ticket?->getQrCodeToken() ?? 'N/A',
+                'price' => round($reservation->getTotalAmount(), 2),
+                'currency' => 'FCFA',
+                'paymentStatus' => $reservation->getPaymentStatus(),
+                'paymentMethod' => $reservation->getPaymentMethod() ?? 'N/A',
+                'ticketStatus' => $ticket?->getStatus() ?? 'pending',
+                'bookingDate' => $reservation->getCreatedAt()?->format('c'),
+                'createdAt' => $reservation->getCreatedAt()?->format('Y-m-d H:i:s'),
+            ];
+        }, $reservations);
+
+        return new JsonResponse($bookingsData, 200);
     }
 }

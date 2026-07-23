@@ -5,6 +5,7 @@ namespace App\Controller;
 use App\Entity\Notification;
 use App\Entity\User;
 use App\Repository\NotificationRepository;
+use App\Repository\AgentRepository;
 use App\Service\NotificationBroadcastService;
 use App\Service\NotificationNormalizer;
 use Doctrine\ORM\EntityManagerInterface;
@@ -17,7 +18,10 @@ use Symfony\Component\Routing\Attribute\Route;
 #[Route('/api/user-notifications')]
 class NotificationController extends AbstractController
 {
-    public function __construct(private NotificationNormalizer $normalizer) {}
+    public function __construct(
+        private NotificationNormalizer $normalizer,
+        private AgentRepository $agentRepository
+        ) {}
 
     #[Route('', name: 'api_notifications_list', methods: ['GET'])]
     public function index(NotificationRepository $notificationRepository): JsonResponse
@@ -39,17 +43,13 @@ class NotificationController extends AbstractController
     /**
      * Création d'une notification.
      *
-     * Sécurité : ce endpoint est accessible à tout utilisateur authentifié,
-     * il ne doit donc JAMAIS permettre de notifier quelqu'un d'autre que
-     * soi-même, ni de diffuser à toute l'agence — sinon n'importe quel compte
-     * peut spammer/harceler d'autres utilisateurs (y compris via le push FCM
-     * réellement envoyé sur leur téléphone).
-     *
-     * - recipientType = 'user' : autorisé uniquement pour soi-même, sauf rôle
-     *   privilégié (ex: agent/admin qui notifie un client d'une réservation).
-     * - recipientType = 'agency_all' (broadcast) : réservé aux rôles privilégiés.
-     *
-     * Adapter 'ROLE_ADMIN' / 'ROLE_AGENT' ci-dessous à votre hiérarchie de rôles réelle.
+     * 👈 CORRIGÉ : la diffusion "agency_all" reste réservée aux rôles
+     * privilégiés, mais est maintenant scopée à une agence précise :
+     * - Un AGENT ne peut diffuser que pour SA PROPRE agence (recipientId
+     *   forcé côté serveur, on ignore toute valeur envoyée par le client
+     *   pour éviter qu'un agent cible l'agence d'un autre).
+     * - Un ADMIN peut cibler une agence précise (recipientId fourni) ou
+     *   une diffusion vraiment globale (recipientId = null → private-global).
      */
     #[Route('', name: 'api_notifications_create', methods: ['POST'])]
     public function create(Request $request, EntityManagerInterface $em, NotificationBroadcastService $broadcaster): JsonResponse
@@ -70,11 +70,28 @@ class NotificationController extends AbstractController
         $recipientType = $data['recipientType'] ?? 'user';
         $requestedRecipientId = isset($data['recipientId']) ? (int)$data['recipientId'] : null;
 
-        $isPrivileged = $this->isGranted('ROLE_ADMIN') || $this->isGranted('ROLE_AGENT');
+        $isAdmin = $this->isGranted('ROLE_ADMIN');
+        $isAgent = $this->isGranted('ROLE_AGENT');
+        $isPrivileged = $isAdmin || $isAgent;
 
-        // Diffusion à toute l'agence : réservée aux comptes privilégiés.
-        if ($recipientType !== 'user' && !$isPrivileged) {
-            return $this->json(['message' => "Vous n'êtes pas autorisé à diffuser ce type de notification."], Response::HTTP_FORBIDDEN);
+        $agencyRecipientId = null;
+
+        if ($recipientType !== 'user') {
+            if (!$isPrivileged) {
+                return $this->json(['message' => "Vous n'êtes pas autorisé à diffuser ce type de notification."], Response::HTTP_FORBIDDEN);
+            }
+
+            if ($isAgent && !$isAdmin) {
+                // Un agent ne diffuse JAMAIS pour une autre agence que la
+                // sienne : on ignore recipientId venant du client.
+                $agent = $this->agentRepository->findOneBy(['user' => $user]) ;
+                $agencyRecipientId = $agent?->getAgency()?->getId();
+                if ($agencyRecipientId === null) {
+                    return $this->json(['message' => 'Agence introuvable pour cet agent.'], Response::HTTP_FORBIDDEN);
+                }
+            } else {
+                $agencyRecipientId = $requestedRecipientId;
+            }
         }
 
         // Notifier un autre utilisateur que soi-même : réservé aux comptes privilégiés.
@@ -89,9 +106,13 @@ class NotificationController extends AbstractController
 
         $notification = new Notification();
         $notification->setRecipientType($recipientType);
-        $notification->setRecipientId(
-            $recipientType === 'user' ? ($requestedRecipientId ?? $user->getId()) : null
-        );
+
+        if ($recipientType === 'user') {
+            $notification->setRecipientId($requestedRecipientId ?? $user->getId());
+        } else {
+            $notification->setRecipientId($agencyRecipientId); // agencyId, ou null = global
+        }
+
         $notification->setTitle($title);
         $notification->setContent($content);
         $notification->setCategory(strtoupper($data['category'] ?? 'INFO'));
@@ -100,7 +121,6 @@ class NotificationController extends AbstractController
         $em->persist($notification);
         $em->flush();
 
-        // Diffusion temps réel + push
         $broadcaster->broadcast($notification);
 
         return $this->json($this->normalizer->normalize($notification), Response::HTTP_CREATED);
@@ -171,5 +191,28 @@ class NotificationController extends AbstractController
         $em->flush();
 
         return $this->json(['updated' => count($notifications)]);
+    }
+
+    /**
+     * 👈 NOUVEAU : route manquante — le front (notification.service.ts)
+     * appelait déjà DELETE /api/user-notifications/{id} sans qu'aucune
+     * route ne l'écoute côté API (404 garanti si le bouton "supprimer"
+     * est utilisé quelque part dans l'UI).
+     */
+    #[Route('/{id}', name: 'api_notifications_delete', methods: ['DELETE'])]
+    public function delete(int $id, NotificationRepository $notificationRepository, EntityManagerInterface $em): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+
+        $notification = $notificationRepository->find($id);
+        if (!$notification || $notification->getRecipientType() !== 'user' || $notification->getRecipientId() !== $user->getId()) {
+            return $this->json(['message' => 'Notification introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $em->remove($notification);
+        $em->flush();
+
+        return $this->json(['deleted' => true]);
     }
 }

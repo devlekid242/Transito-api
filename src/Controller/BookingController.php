@@ -190,6 +190,27 @@ class BookingController extends AbstractController
                 ->setCategory('BOOKING');
             $this->em->persist($notification);
 
+            // 👈 NOUVEAU : jusqu'ici, seul le client était notifié d'une
+            // nouvelle réservation — l'agence n'avait aucun moyen de savoir
+            // en temps réel qu'un siège venait d'être pris sur un de ses
+            // trajets, en dehors d'un rafraîchissement manuel du dashboard.
+            $agencyNotification = null;
+            if ($trip->getAgency()) {
+                $agencyNotification = new Notification();
+                $agencyNotification->setRecipientType('agency_all')
+                    ->setRecipientId($trip->getAgency()->getId())
+                    ->setTitle('Nouvelle réservation')
+                    ->setContent(sprintf(
+                        '%d place(s) réservée(s) sur le trajet %s → %s du %s.',
+                        $seatsRequested,
+                        $trip->getDepartureCity(),
+                        $trip->getArrivalCity(),
+                        $trip->getDepartureTime()?->format('d/m/Y à H:i') ?? '',
+                    ))
+                    ->setCategory('BOOKING');
+                $this->em->persist($agencyNotification);
+            }
+
             $this->em->flush();
             $connection->commit();
         } catch (\Throwable $e) {
@@ -198,6 +219,9 @@ class BookingController extends AbstractController
         }
 
         $this->notificationBroadcaster->broadcast($notification);
+        if ($agencyNotification) {
+            $this->notificationBroadcaster->broadcast($agencyNotification);
+        }
 
         // Complète le numéro de billet maintenant que les tickets ont un id.
         $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
@@ -488,8 +512,32 @@ class BookingController extends AbstractController
             ->setCategory('BOOKING');
         $this->em->persist($notification);
 
+        // 👈 NOUVEAU : l'agence n'était jamais informée qu'un client venait
+        // d'annuler, alors que ça libère un siège sur SON trajet — utile pour
+        // qu'un autre client puisse le reprendre sans attendre un
+        // rafraîchissement manuel du dashboard partenaire.
+        $agencyNotification = null;
+        if ($trip->getAgency()) {
+            $agencyNotification = new Notification();
+            $agencyNotification->setRecipientType('agency_all')
+                ->setRecipientId($trip->getAgency()->getId())
+                ->setTitle('Réservation annulée par un client')
+                ->setContent(sprintf(
+                    'Une réservation a été annulée sur le trajet %s → %s du %s (%d siège(s) libéré(s)).',
+                    $trip->getDepartureCity(),
+                    $trip->getArrivalCity(),
+                    $departureTime->format('d/m/Y à H:i'),
+                    count($tickets),
+                ))
+                ->setCategory('BOOKING');
+            $this->em->persist($agencyNotification);
+        }
+
         $this->em->flush();
         $this->notificationBroadcaster->broadcast($notification);
+        if ($agencyNotification) {
+            $this->notificationBroadcaster->broadcast($agencyNotification);
+        }
 
         return new JsonResponse([
             'ok' => true,
