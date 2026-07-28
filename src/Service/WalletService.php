@@ -3,10 +3,16 @@
 namespace App\Service;
 
 use App\Entity\Agency;
+use App\Entity\RefundRequest;
 use App\Entity\Reservation;
+use App\Entity\Ticket;
+use App\Entity\User;
 use App\Entity\Wallet;
 use App\Entity\WalletTransaction;
 use App\Entity\WithdrawalRequest;
+use App\Repository\RefundRequestRepository;
+use App\Repository\TicketRepository;
+use App\Repository\WithdrawalRequestRepository;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -23,7 +29,15 @@ class WalletService
 {
     public const PLATFORM_FEE = 500.00;
 
-    public function __construct(private EntityManagerInterface $em) {}
+    public function __construct(
+        private EntityManagerInterface $em,
+        private ?RefundRequestRepository $refundRequestRepository = null,
+        private ?TicketRepository $ticketRepository = null,
+        private ?WithdrawalRequestRepository $withdrawalRequestRepository = null
+    ) {
+        // For backward compatibility, repositories might be null
+        // in some contexts, but they're required for advanced features
+    }
 
     public function getOrCreateWallet(Agency $agency): Wallet
     {
@@ -302,5 +316,289 @@ class WalletService
         $this->em->persist($tx);
 
         return $tx;
+    }
+
+    /**
+     * Check if an agency can safely process a withdrawal considering pending refunds.
+     * 
+     * @param WithdrawalRequest $withdrawal The withdrawal request to check
+     * @return array {solvent: bool, message: string, remainingBalance: float, totalPendingRefunds: float}
+     * @throws \RuntimeException If refund request repository is not available
+     */
+    public function checkWithdrawalSolvency(WithdrawalRequest $withdrawal): array
+    {
+        if (!$this->refundRequestRepository) {
+            throw new \RuntimeException('RefundRequestRepository is required for solvency check.');
+        }
+
+        $agency = $withdrawal->getAgency();
+        if (!$agency) {
+            return [
+                'solvent' => false,
+                'message' => 'No agency associated with this withdrawal request.',
+                'remainingBalance' => 0.0,
+                'totalPendingRefunds' => 0.0,
+            ];
+        }
+
+        $wallet = $this->getOrCreateWallet($agency);
+        $withdrawalAmount = (float) $withdrawal->getAmount();
+        
+        $currentBalance = (float) $wallet->getAvailableBalance();
+        $reservedBalance = (float) $wallet->getReservedBalance();
+        $totalAvailable = $currentBalance + $reservedBalance;
+        
+        $balanceAfterWithdrawal = $totalAvailable - $withdrawalAmount;
+        $totalPendingRefunds = $this->refundRequestRepository->getPendingRefundsAmountForAgency($agency);
+        
+        $solvent = $balanceAfterWithdrawal >= $totalPendingRefunds;
+        
+        if ($solvent) {
+            return [
+                'solvent' => true,
+                'message' => 'Agency can safely cover pending refunds after this withdrawal.',
+                'remainingBalance' => $balanceAfterWithdrawal,
+                'totalPendingRefunds' => $totalPendingRefunds,
+            ];
+        } else {
+            $shortfall = $totalPendingRefunds - $balanceAfterWithdrawal;
+            return [
+                'solvent' => false,
+                'message' => sprintf(
+                    'Financial risk: After withdrawal of %.2f, agency will have %.2f but owes %.2f in customer refunds. Shortfall: %.2f',
+                    $withdrawalAmount,
+                    $balanceAfterWithdrawal,
+                    $totalPendingRefunds,
+                    $shortfall
+                ),
+                'remainingBalance' => $balanceAfterWithdrawal,
+                'totalPendingRefunds' => $totalPendingRefunds,
+            ];
+        }
+    }
+
+    /**
+     * Get the total pending refund amount for an agency
+     */
+    public function getPendingRefundAmountForAgency(Agency $agency): float
+    {
+        if (!$this->refundRequestRepository) {
+            return 0.0;
+        }
+        return $this->refundRequestRepository->getPendingRefundsAmountForAgency($agency);
+    }
+
+    /**
+     * Set the refund request repository (for dependency injection)
+     */
+    public function setRefundRequestRepository(RefundRequestRepository $repository): void
+    {
+        $this->refundRequestRepository = $repository;
+    }
+
+    /**
+     * Set the ticket repository (for dependency injection)
+     */
+    public function setTicketRepository(TicketRepository $repository): void
+    {
+        $this->ticketRepository = $repository;
+    }
+
+    /**
+     * Set the withdrawal request repository (for dependency injection)
+     */
+    public function setWithdrawalRequestRepository(WithdrawalRequestRepository $repository): void
+    {
+        $this->withdrawalRequestRepository = $repository;
+    }
+
+    /**
+     * Calculate the blocked balance for an agency wallet.
+     * Blocked Balance = (Sum of pending customer refund requests) + (Total value of unvalidated ticket reservations)
+     * 
+     * @param Wallet $wallet The wallet to calculate blocked balance for
+     * @return float The blocked balance amount
+     */
+    public function calculateBlockedBalance(Wallet $wallet): float
+    {
+        $agency = $wallet->getAgency();
+        if (!$agency) {
+            return 0.0;
+        }
+
+        $blockedAmount = 0.0;
+
+        // 1. Sum of pending customer refund requests
+        if ($this->refundRequestRepository) {
+            $pendingRefundsAmount = $this->refundRequestRepository->getPendingRefundsAmountForAgency($agency);
+            $blockedAmount += $pendingRefundsAmount;
+        }
+
+        // 2. Total value of ticket reservations where passengers have NOT been validated as embarked/boarded
+        if ($this->ticketRepository) {
+            $unvalidatedTicketsAmount = $this->ticketRepository->getUnvalidatedTicketsAmountForAgency($agency);
+            $blockedAmount += $unvalidatedTicketsAmount;
+        }
+
+        return round($blockedAmount, 2);
+    }
+
+    /**
+     * Manually credit an agency wallet with full audit trail.
+     * 
+     * @param Wallet $wallet The wallet to credit
+     * @param float $amount The amount to credit
+     * @param User $admin The admin performing the action
+     * @param string $reason The justification/reason for the credit
+     * @return WalletTransaction The created transaction
+     */
+    public function creditWalletManually(Wallet $wallet, float $amount, User $admin, string $reason): WalletTransaction
+    {
+        $amount = round($amount, 2);
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException('Credit amount must be positive.');
+        }
+
+        $oldBalance = (float) $wallet->getAvailableBalance();
+        $newBalance = round($oldBalance + $amount, 2);
+        
+        $wallet->setAvailableBalance((string) $newBalance);
+        $wallet->touch();
+
+        $tx = new WalletTransaction();
+        $tx->setWallet($wallet);
+        $tx->setType(WalletTransaction::TYPE_CREDIT);
+        $tx->setSource(WalletTransaction::SOURCE_ADMIN_CREDIT);
+        $tx->setAmount((string) $amount);
+        $tx->setBalanceAfter((string) $newBalance);
+        $tx->setAdmin($admin);
+        $tx->setAdminReason($reason);
+        $tx->setDescription(sprintf('Crédit manuel par admin: %s (ID: %d)', $reason, $admin->getId()));
+
+        $this->em->persist($wallet);
+        $this->em->persist($tx);
+
+        return $tx;
+    }
+
+    /**
+     * Manually debit an agency wallet with full audit trail.
+     * 
+     * @param Wallet $wallet The wallet to debit
+     * @param float $amount The amount to debit
+     * @param User $admin The admin performing the action
+     * @param string $reason The justification/reason for the debit
+     * @return WalletTransaction The created transaction
+     * @throws \RuntimeException If insufficient funds
+     */
+    public function debitWalletManually(Wallet $wallet, float $amount, User $admin, string $reason): WalletTransaction
+    {
+        $amount = round($amount, 2);
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException('Debit amount must be positive.');
+        }
+
+        $availableBalance = (float) $wallet->getAvailableBalance();
+        if ($amount > $availableBalance) {
+            throw new \RuntimeException(sprintf(
+                'Insufficient funds. Available: %.2f, Attempted debit: %.2f',
+                $availableBalance,
+                $amount
+            ));
+        }
+
+        $newBalance = round($availableBalance - $amount, 2);
+        
+        $wallet->setAvailableBalance((string) $newBalance);
+        $wallet->touch();
+
+        $tx = new WalletTransaction();
+        $tx->setWallet($wallet);
+        $tx->setType(WalletTransaction::TYPE_DEBIT);
+        $tx->setSource(WalletTransaction::SOURCE_ADMIN_DEBIT);
+        $tx->setAmount((string) $amount);
+        $tx->setBalanceAfter((string) $newBalance);
+        $tx->setAdmin($admin);
+        $tx->setAdminReason($reason);
+        $tx->setDescription(sprintf('Débit manuel par admin: %s (ID: %d)', $reason, $admin->getId()));
+
+        $this->em->persist($wallet);
+        $this->em->persist($tx);
+
+        return $tx;
+    }
+
+    /**
+     * Freeze an agency wallet.
+     * 
+     * @param Wallet $wallet The wallet to freeze
+     * @param User $admin The admin performing the action
+     * @param string $reason Optional reason for freezing
+     */
+    public function freezeWallet(Wallet $wallet, User $admin, ?string $reason = null): void
+    {
+        $wallet->freeze($admin);
+        
+        // Create audit transaction
+        $tx = new WalletTransaction();
+        $tx->setWallet($wallet);
+        $tx->setType(WalletTransaction::TYPE_DEBIT);
+        $tx->setSource(WalletTransaction::SOURCE_WALLET_FREEZE);
+        $tx->setAmount('0.00');
+        $tx->setBalanceAfter($wallet->getAvailableBalance());
+        $tx->setAdmin($admin);
+        $tx->setAdminReason($reason ?? 'Portefeuille gelé par administrateur');
+        $tx->setDescription(sprintf('Portefeuille gelé par admin ID: %d', $admin->getId()));
+
+        $this->em->persist($wallet);
+        $this->em->persist($tx);
+    }
+
+    /**
+     * Unfreeze an agency wallet.
+     * 
+     * @param Wallet $wallet The wallet to unfreeze
+     * @param User $admin The admin performing the action
+     * @param string $reason Optional reason for unfreezing
+     */
+    public function unfreezeWallet(Wallet $wallet, User $admin, ?string $reason = null): void
+    {
+        $wallet->unfreeze();
+        
+        // Create audit transaction
+        $tx = new WalletTransaction();
+        $tx->setWallet($wallet);
+        $tx->setType(WalletTransaction::TYPE_CREDIT);
+        $tx->setSource(WalletTransaction::SOURCE_WALLET_UNFREEZE);
+        $tx->setAmount('0.00');
+        $tx->setBalanceAfter($wallet->getAvailableBalance());
+        $tx->setAdmin($admin);
+        $tx->setAdminReason($reason ?? 'Portefeuille dégélé par administrateur');
+        $tx->setDescription(sprintf('Portefeuille dégélé par admin ID: %d', $admin->getId()));
+
+        $this->em->persist($wallet);
+        $this->em->persist($tx);
+    }
+
+    /**
+     * Get wallet summary with all three balances (available, reserved, blocked)
+     * 
+     * @param Wallet $wallet The wallet to get summary for
+     * @return array{available: float, reserved: float, blocked: float, total: float}
+     */
+    public function getWalletBalanceSummary(Wallet $wallet): array
+    {
+        $available = (float) $wallet->getAvailableBalance();
+        $reserved = (float) $wallet->getReservedBalance();
+        $blocked = $this->calculateBlockedBalance($wallet);
+        $total = round($available + $reserved, 2);
+
+        return [
+            'available' => $available,
+            'reserved' => $reserved,
+            'blocked' => $blocked,
+            'total' => $total,
+            'availableForWithdrawal' => max(0, $available - $blocked), // Available minus blocked
+        ];
     }
 }

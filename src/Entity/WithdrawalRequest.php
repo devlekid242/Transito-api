@@ -39,9 +39,22 @@ use Symfony\Component\Validator\Constraints as Assert;
             controller: PartnerFinanceController::class . '::listWithdrawals',
             name: 'api_partner_withdrawals_list'
         ),
-        // Traitement admin : ces deux routes finalisent (ou annulent) le blocage
-        // de fonds effectué à la création de la demande. Brancher un contrôle de
-        // rôle (super-admin) avant mise en production — voir TODO dans le contrôleur.
+        // Traitement admin : ces routes gèrent les demandes de retrait côté administration
+        new GetCollection(
+            uriTemplate: '/admin/withdrawals',
+            controller: AdminWithdrawalController::class . '::list',
+            name: 'api_admin_withdrawals_list'
+        ),
+        new Get(
+            uriTemplate: '/admin/withdrawals/{id}',
+            controller: AdminWithdrawalController::class . '::detail',
+            name: 'api_admin_withdrawals_detail'
+        ),
+        new Get(
+            uriTemplate: '/admin/withdrawals/{id}/check-solvency',
+            controller: AdminWithdrawalController::class . '::checkSolvency',
+            name: 'api_admin_withdrawals_check_solvency'
+        ),
         new Post(
             uriTemplate: '/admin/withdrawals/{id}/approve',
             controller: AdminWithdrawalController::class . '::approve',
@@ -101,6 +114,17 @@ class WithdrawalRequest
     #[ORM\Column(name: 'admin_note', type: Types::TEXT, nullable: true)]
     #[Groups(['withdrawal:read'])]
     private ?string $adminNote = null;
+
+    // L'admin qui a traité cette demande — pour la traçabilité
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'processed_by_admin_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[Groups(['withdrawal:read'])]
+    private ?User $processedByAdmin = null;
+
+    // Flag pour autoriser le paiement forcé (contourne la vérification de solvabilité)
+    #[ORM\Column(name: 'force_paid', type: Types::BOOLEAN, options: ['default' => false])]
+    #[Groups(['withdrawal:read'])]
+    private bool $forcePaid = false;
 
     #[ORM\Column(name: 'processed_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     #[Groups(['withdrawal:read'])]
@@ -194,6 +218,28 @@ class WithdrawalRequest
     public function setAdminNote(?string $adminNote): static
     {
         $this->adminNote = $adminNote;
+        return $this;
+    }
+
+    public function getProcessedByAdmin(): ?User
+    {
+        return $this->processedByAdmin;
+    }
+
+    public function setProcessedByAdmin(?User $processedByAdmin): static
+    {
+        $this->processedByAdmin = $processedByAdmin;
+        return $this;
+    }
+
+    public function isForcePaid(): bool
+    {
+        return $this->forcePaid;
+    }
+
+    public function setForcePaid(bool $forcePaid): static
+    {
+        $this->forcePaid = $forcePaid;
         return $this;
     }
 

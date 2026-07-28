@@ -55,17 +55,28 @@ class StatisticsController extends AbstractController
         }
 
         // Statistiques de validation de tickets
+        // KPI personnel affiché sur la carte "Billets validés" : uniquement
+        // ce que CET agent a validé.
         $ticketsValidated = $this->ticketRepository->countValidatedByAgent($agent, $start, $end);
         $ticketsPending = $this->ticketRepository->countPendingByTrip($agent->getAgency(), $start, $end);
+
+        // 👈 CORRIGÉ : le "taux de validation" comparait auparavant les
+        // billets validés PAR CET AGENT SEUL aux billets en attente de TOUTE
+        // L'AGENCE — deux échelles différentes, ratio sans signification. Le
+        // taux porte maintenant sur l'agence entière des deux côtés (combien
+        // de billets de l'agence, tous agents confondus, sont déjà validés
+        // sur ceux attendus), ce qui est une mesure opérationnelle cohérente.
+        $ticketsValidatedByAgency = $this->ticketRepository->countValidatedByAgency($agent->getAgency(), $start, $end);
+
+        // 👈 CORRIGÉ : `->modify('-1 period')` n'est pas une syntaxe valide
+        // pour DateTime (voir shiftToPreviousPeriod()) — la comparaison ne
+        // décalait jamais réellement la période précédente.
+        [$previousStart, $previousEnd] = $this->shiftToPreviousPeriod($start, $end);
 
         // Calcul du changement en pourcentage
         $ticketsChangePct = $this->calculatePercentageChange(
             $ticketsValidated,
-            $this->ticketRepository->countValidatedByAgent(
-                $agent,
-                (clone $start)->modify('-1 period'),
-                (clone $end)->modify('-1 period')
-            )
+            $this->ticketRepository->countValidatedByAgent($agent, $previousStart, $previousEnd)
         );
 
         // Statistiques de trajets
@@ -75,16 +86,12 @@ class StatisticsController extends AbstractController
 
         // Revenus
         $revenue = $this->calculateRevenueByAgent($agent, $start, $end);
-        $previousRevenue = $this->calculateRevenueByAgent(
-            $agent,
-            (clone $start)->modify('-1 period'),
-            (clone $end)->modify('-1 period')
-        );
+        $previousRevenue = $this->calculateRevenueByAgent($agent, $previousStart, $previousEnd);
         $revenueChange = $this->calculatePercentageChange($revenue, $previousRevenue);
 
-        // Performance: taux de validation
-        $totalTickets = $ticketsValidated + $ticketsPending;
-        $validationRate = $totalTickets > 0 ? round(($ticketsValidated / $totalTickets) * 100, 2) : 0;
+        // Performance: taux de validation (échelle agence, cf. plus haut)
+        $totalTickets = $ticketsValidatedByAgency + $ticketsPending;
+        $validationRate = $totalTickets > 0 ? round(($ticketsValidatedByAgency / $totalTickets) * 100, 2) : 0;
 
         // Passagers embarqués
         $passengersBoarded = $this->ticketRepository->countBoardedPassengers($agent, $start, $end);
@@ -287,7 +294,10 @@ class StatisticsController extends AbstractController
         $trips = $this->tripRepository->findTripsWithinPeriod($agent->getAgency(), $start, $end);
 
         $tripsData = array_map(function (Trip $trip) {
-            $tickets = $this->ticketRepository->findBy(['reservation' => $trip->getId()]);
+            // 👈 CORRIGÉ : utilisait findBy(['reservation' => $trip->getId()]),
+            // qui compare l'id de la réservation d'un ticket à l'id d'un Trip
+            // — deux séquences d'ID indépendantes, donc des tickets au hasard.
+            $tickets = $this->ticketRepository->findTicketsByTrip($trip);
             $boardedCount = count(array_filter($tickets, fn($t) => $t->getStatus() === 'embarque'));
             $totalCount = count($tickets);
 
@@ -380,23 +390,68 @@ class StatisticsController extends AbstractController
         return $sign . round($change, 1) . '%';
     }
 
+    /**
+     * Calcule la période "précédente", de même durée que [$start, $end], et
+     * qui se termine juste avant $start.
+     *
+     * 👈 CORRIGÉ : le code appelait auparavant `->modify('-1 period')`, qui
+     * n'est PAS une syntaxe reconnue par DateTime::modify() ("period" n'est
+     * pas un mot-clé relatif valide). Cet appel ne décalait donc jamais
+     * réellement la date (au mieux un no-op, au pire une exception selon la
+     * version de PHP) : on comparait en réalité la période courante à
+     * elle-même, ce qui faussait tous les "+X%" affichés au dashboard.
+     *
+     * @return array{0: \DateTime, 1: \DateTime} [$previousStart, $previousEnd]
+     */
+    private function shiftToPreviousPeriod(\DateTime $start, \DateTime $end): array
+    {
+        $durationInSeconds = $end->getTimestamp() - $start->getTimestamp();
+        if ($durationInSeconds <= 0) {
+            // Garde-fou : une période nulle/négative ne doit jamais produire
+            // une division par zéro ou une plage absurde en aval.
+            $durationInSeconds = 86400;
+        }
+
+        $previousEnd = (clone $start)->modify('-1 second');
+        $previousStart = (clone $previousEnd)->modify("-{$durationInSeconds} seconds");
+
+        return [$previousStart, $previousEnd];
+    }
+
+    /**
+     * 👈 CORRIGÉ EN PROFONDEUR : cette méthode calculait le revenu de TOUTE
+     * L'AGENCE sur la période (la requête filtrait par `a.id = agence`, pas
+     * par agent) — deux agents différents de la même agence voyaient donc
+     * exactement le même montant sur "leur" dashboard, ce qui n'a aucun sens
+     * pour une page de performance individuelle.
+     *
+     * On calcule maintenant le revenu réellement attribuable à CET agent :
+     * la somme des réservations payées dont il a personnellement validé au
+     * moins un billet sur la période. Chaque réservation n'est comptée
+     * qu'UNE SEULE FOIS même si l'agent a validé plusieurs billets de cette
+     * même réservation (sinon une réservation à 3 passagers, tous validés
+     * par le même agent, verrait son montant triplé).
+     */
     private function calculateRevenueByAgent(Agent $agent, \DateTime $start, \DateTime $end): float
     {
-        $qb = $this->em->createQueryBuilder()
-            ->select('SUM(r.totalAmount)')
-            ->from('App\Entity\Reservation', 'r')
-            ->join('r.trip', 't')
-            ->join('t.agency', 'a')
-            ->where('a.id = :agency')
-            ->andWhere('r.paymentStatus = :status')
-            ->andWhere('r.createdAt >= :start')
-            ->andWhere('r.createdAt <= :end')
-            ->setParameter('agency', $agent->getAgency()->getId())
-            ->setParameter('status', 'paye')
-            ->setParameter('start', $start)
-            ->setParameter('end', $end);
+        $tickets = $this->ticketRepository->findValidatedByAgentWithinPeriod($agent, $start, $end);
 
-        return (float)$qb->getQuery()->getSingleScalarResult() ?? 0;
+        $countedReservationIds = [];
+        $sum = 0.0;
+        foreach ($tickets as $ticket) {
+            $reservation = $ticket->getReservation();
+            if (!$reservation || $reservation->getPaymentStatus() !== 'paye') {
+                continue;
+            }
+            $reservationId = $reservation->getId();
+            if (isset($countedReservationIds[$reservationId])) {
+                continue;
+            }
+            $countedReservationIds[$reservationId] = true;
+            $sum += (float) $reservation->getTotalAmount();
+        }
+
+        return $sum;
     }
 
     private function calculateRevenueByAgency(\App\Entity\Agency $agency, \DateTime $start, \DateTime $end): float
@@ -425,7 +480,8 @@ class StatisticsController extends AbstractController
         }
 
         $fillRates = array_map(function (Trip $trip) {
-            $tickets = $this->ticketRepository->findBy(['reservation' => $trip->getId()]);
+            // Même correctif que getAgentTripsDetails() / calculateTripRevenue().
+            $tickets = $this->ticketRepository->findTicketsByTrip($trip);
             $boardedCount = count(array_filter($tickets, fn($t) => $t->getStatus() === 'embarque'));
             $bus = $trip->getBus();
             $capacity = $bus?->getCapacity() ?? 1;
@@ -435,11 +491,36 @@ class StatisticsController extends AbstractController
         return array_sum($fillRates) / count($fillRates);
     }
 
+    /**
+     * 👈 CORRIGÉ (double bug) :
+     *  1) Utilisait findBy(['reservation' => $trip->getId()]), qui compare
+     *     l'id de réservation d'un ticket à l'id d'un Trip — mauvaise
+     *     jointure, tickets récupérés au hasard.
+     *  2) Sommait `reservation->getTotalAmount()` UNE FOIS PAR TICKET : une
+     *     réservation à 3 passagers a 3 tickets liés au même montant, donc
+     *     son totalAmount était compté 3 fois → revenu du trajet triplé pour
+     *     toute réservation multi-passagers.
+     * On ne compte maintenant chaque réservation payée qu'une seule fois.
+     */
     private function calculateTripRevenue(Trip $trip): float
     {
-        $tickets = $this->ticketRepository->findBy(['reservation' => $trip->getId()]);
-        return array_reduce($tickets, function ($sum, $ticket) {
-            return $sum + ($ticket->getReservation()?->getTotalAmount() ?? 0);
-        }, 0);
+        $tickets = $this->ticketRepository->findTicketsByTrip($trip);
+
+        $countedReservationIds = [];
+        $sum = 0.0;
+        foreach ($tickets as $ticket) {
+            $reservation = $ticket->getReservation();
+            if (!$reservation || $reservation->getPaymentStatus() !== 'paye') {
+                continue;
+            }
+            $reservationId = $reservation->getId();
+            if (isset($countedReservationIds[$reservationId])) {
+                continue;
+            }
+            $countedReservationIds[$reservationId] = true;
+            $sum += (float) $reservation->getTotalAmount();
+        }
+
+        return $sum;
     }
 }

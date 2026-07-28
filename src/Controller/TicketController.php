@@ -82,15 +82,29 @@ class TicketController extends AbstractController
             ]), 409);
         }
 
+        // Sécurité manquante jusqu'ici : rien n'empêchait de valider un billet
+        // n'importe quel jour. Un billet ne doit être embarquable que le jour
+        // exact du voyage (ni avant, ni après).
+        if ($deny = $this->denyIfNotTravelDay($ticket)) {
+            return $deny;
+        }
+
         $ticket->setStatus('embarque');
         $ticket->setValidatedByAgent($agent);
         $ticket->setValidatedAt(new \DateTime());
         $this->em->persist($ticket);
 
-        $notification = $this->notifyPassengerOfBoarding($ticket);
+        // Le passager ET l'agence/partenaire doivent être notifiés : jusqu'ici
+        // seul le passager recevait une notification, le partenaire n'avait
+        // aucune visibilité sur les validations effectuées par ses agents.
+        $passengerNotification = $this->notifyPassengerOfBoarding($ticket);
+        $agencyNotification = $this->notifyAgencyOfBoarding($ticket, $agent);
         $this->em->flush();
-        if ($notification) {
-            $this->notificationBroadcaster->broadcast($notification);
+        if ($passengerNotification) {
+            $this->notificationBroadcaster->broadcast($passengerNotification);
+        }
+        if ($agencyNotification) {
+            $this->notificationBroadcaster->broadcast($agencyNotification);
         }
 
         return new JsonResponse(array_merge($this->mapTicket($ticket), [
@@ -129,17 +143,62 @@ class TicketController extends AbstractController
             return new JsonResponse(['error' => 'Ce billet a déjà été validé.'], 400);
         }
 
+        if ($deny = $this->denyIfNotTravelDay($ticket)) {
+            return $deny;
+        }
+
         $ticket->setStatus('embarque');
         $ticket->setValidatedByAgent($agent);
         $ticket->setValidatedAt(new \DateTime());
 
-        $notification = $this->notifyPassengerOfBoarding($ticket);
+        $passengerNotification = $this->notifyPassengerOfBoarding($ticket);
+        $agencyNotification = $this->notifyAgencyOfBoarding($ticket, $agent);
         $this->em->flush();
-        if ($notification) {
-            $this->notificationBroadcaster->broadcast($notification);
+        if ($passengerNotification) {
+            $this->notificationBroadcaster->broadcast($passengerNotification);
+        }
+        if ($agencyNotification) {
+            $this->notificationBroadcaster->broadcast($agencyNotification);
         }
 
         return new JsonResponse(array_merge($this->mapTicket($ticket), ['ok' => true]), 200);
+    }
+
+    /**
+     * Endpoint manquant jusqu'ici (référencé par Ticket.php mais jamais
+     * implémenté -> 404/500 garanti à l'appel). Liste les billets encore
+     * "en_attente" (non validés, non annulés) pour l'agence de l'agent
+     * connecté, éventuellement filtrés par trajet. Sert par exemple à l'écran
+     * partenaire qui affiche les billets restant à embarquer sur un trajet.
+     */
+    #[Route('/api/tickets/available', name: 'tickets_available', methods: ['GET'])]
+    public function getAvailableTickets(Request $request): JsonResponse
+    {
+        $agent = $this->resolveAuthenticatedAgent();
+        if ($agent instanceof JsonResponse) {
+            return $agent;
+        }
+        $agentAgency = method_exists($agent, 'getAgency') ? $agent->getAgency() : null;
+
+        $tripId = $request->query->get('trip_id');
+        $repo = $this->em->getRepository(Ticket::class);
+
+        $qb = $repo->createQueryBuilder('t')
+            ->join('t.reservation', 'r')
+            ->join('r.trip', 'tr')
+            ->andWhere('t.status = :status')
+            ->setParameter('status', 'en_attente');
+
+        if ($tripId) {
+            $qb->andWhere('tr.id = :tripId')->setParameter('tripId', $tripId);
+        }
+        // Même règle que list() : un agent ne voit que les billets de sa propre agence.
+        if ($agentAgency) {
+            $qb->andWhere('tr.agency = :agency')->setParameter('agency', $agentAgency->getId());
+        }
+
+        $tickets = $qb->getQuery()->getResult();
+        return new JsonResponse(array_map([$this, 'mapTicket'], $tickets), 200);
     }
 
     #[Route('/api/tickets/list', name: 'tickets_list', methods: ['GET'])]
@@ -272,6 +331,90 @@ class TicketController extends AbstractController
         return null;
     }
 
+    /**
+     * Sécurité manquante jusqu'ici : un billet pouvait être validé n'importe
+     * quel jour (avant ou longtemps après le voyage). On compare la date du
+     * jour serveur à la date du voyage (tripDate si renseignée, sinon la date
+     * de departureTime) :
+     *  - voyage dans le futur  -> refusé, pas encore le jour J.
+     *  - voyage dans le passé  -> refusé, billet expiré.
+     *  - pas de date exploitable -> refusé par prudence plutôt que d'accepter
+     *    silencieusement n'importe quand.
+     */
+    private function denyIfNotTravelDay(Ticket $ticket): ?JsonResponse
+    {
+        $trip = $ticket->getReservation()?->getTrip();
+        $travelDate = $trip?->getTripDate() ?? $trip?->getDepartureTime();
+
+        if (!$travelDate) {
+            return new JsonResponse([
+                'success' => false,
+                'boardingStatus' => 'NO_TRAVEL_DATE',
+                'message' => "Impossible de vérifier la date de voyage de ce billet.",
+            ], 400);
+        }
+
+        $today = new \DateTime('today');
+        $travelDay = new \DateTime($travelDate->format('Y-m-d'));
+
+        if ($travelDay < $today) {
+            return new JsonResponse([
+                'success' => false,
+                'boardingStatus' => 'EXPIRED',
+                'message' => sprintf(
+                    "Ce billet était valable pour le %s. Il ne peut plus être validé.",
+                    $travelDay->format('d/m/Y')
+                ),
+            ], 400);
+        }
+
+        if ($travelDay > $today) {
+            return new JsonResponse([
+                'success' => false,
+                'boardingStatus' => 'NOT_YET_VALID',
+                'message' => sprintf(
+                    "Ce billet est prévu pour le %s. Il ne peut pas être validé avant cette date.",
+                    $travelDay->format('d/m/Y')
+                ),
+            ], 400);
+        }
+
+        return null;
+    }
+
+    /**
+     * Manquait jusqu'ici : seul le passager était notifié d'une validation.
+     * L'agence (le partenaire) doit aussi être informée qu'un de ses agents
+     * vient d'embarquer un passager, avec le nom de l'agent pour la traçabilité.
+     */
+    private function notifyAgencyOfBoarding(Ticket $ticket, Agent $agent): ?Notification
+    {
+        $agency = $ticket->getReservation()?->getTrip()?->getAgency();
+        if (!$agency) {
+            return null;
+        }
+
+        $agentName = method_exists($agent, 'getFullName') ? $agent->getFullName() : 'Un agent';
+        $trip = $ticket->getReservation()?->getTrip();
+
+        $notification = new Notification();
+        $notification->setRecipientType('agency')
+            ->setRecipientId($agency->getId())
+            ->setTitle('Billet validé par un agent')
+            ->setContent(sprintf(
+                'Le billet %s de %s a été validé par %s pour le trajet %s → %s.',
+                'TKT-' . $ticket->getId(),
+                $ticket->getPassengerName(),
+                $agentName,
+                $trip?->getDepartureCity() ?? '',
+                $trip?->getArrivalCity() ?? '',
+            ))
+            ->setCategory('TICKET');
+        $this->em->persist($notification);
+
+        return $notification;
+    }
+
     private function notifyPassengerOfBoarding(Ticket $ticket): ?Notification
     {
         $user = $ticket->getReservation()?->getUser();
@@ -341,6 +484,7 @@ class TicketController extends AbstractController
             'status' => $statusMap[$ticket->getStatus()] ?? 'Expiré',
             'isCancelled' => $isCancelled,
             'canDisplayDetails' => !$isCancelled,
+            'validatedByAgentId' => $validatedByAgent?->getId(),
             'validatedByAgentName' => ($validatedByAgent && method_exists($validatedByAgent, 'getFullName'))
                 ? $validatedByAgent->getFullName()
                 : null,

@@ -16,28 +16,71 @@ class AgencyRepository extends ServiceEntityRepository
         parent::__construct($registry, Agency::class);
     }
 
-//    /**
-//     * @return Agency[] Returns an array of Agency objects
-//     */
-//    public function findByExampleField($value): array
-//    {
-//        return $this->createQueryBuilder('a')
-//            ->andWhere('a.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->orderBy('a.id', 'ASC')
-//            ->setMaxResults(10)
-//            ->getQuery()
-//            ->getResult()
-//        ;
-//    }
+    /**
+     * Get KYC status distribution across agencies.
+     * KYC status is derived from agency documents.
+     * Returns array with status as key and count as value.
+     */
+    public function getKycStatusDistribution(): array
+    {
+        // Get all agencies with their document counts
+        $agencies = $this->findAll();
+        
+        $distribution = [
+            'verified' => 0,
+            'pending' => 0,
+            'missing' => 0,
+            'rejected' => 0,
+        ];
+        
+        foreach ($agencies as $agency) {
+            $documents = $agency->getDocuments();
+            $kycStatus = $this->getAgencyKycStatus($documents);
+            $distribution[$kycStatus]++;
+        }
+        
+        return $distribution;
+    }
 
-//    public function findOneBySomeField($value): ?Agency
-//    {
-//        return $this->createQueryBuilder('a')
-//            ->andWhere('a.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->getQuery()
-//            ->getOneOrNullResult()
-//        ;
-//    }
+    /**
+     * Determine KYC status based on agency documents.
+     */
+    private function getAgencyKycStatus($documents): string
+    {
+        if ($documents->isEmpty()) {
+            return 'missing';
+        }
+        
+        $hasRejected = false;
+        $hasApproved = false;
+        $hasPending = false;
+        
+        foreach ($documents as $doc) {
+            switch ($doc->getStatus()) {
+                case 'approved':
+                    $hasApproved = true;
+                    break;
+                case 'pending':
+                    $hasPending = true;
+                    break;
+                case 'rejected':
+                    $hasRejected = true;
+                    break;
+            }
+        }
+        
+        if ($hasRejected) {
+            return 'rejected';
+        }
+        
+        if ($hasPending && !$hasApproved) {
+            return 'pending';
+        }
+        
+        if ($hasApproved) {
+            return 'verified';
+        }
+        
+        return 'missing';
+    }
 }

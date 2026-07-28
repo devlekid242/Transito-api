@@ -66,6 +66,22 @@ class Wallet
     #[Groups(['wallet:read'])]
     private string $totalWithdrawn = '0.00';
 
+    // Statut de gel du portefeuille : false = actif, true = gelé
+    #[ORM\Column(name: 'is_frozen', type: Types::BOOLEAN, options: ['default' => false])]
+    #[Groups(['wallet:read'])]
+    private bool $isFrozen = false;
+
+    // Date à laquelle le portefeuille a été gelé/dégelé
+    #[ORM\Column(name: 'frozen_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    #[Groups(['wallet:read'])]
+    private ?\DateTimeInterface $frozenAt = null;
+
+    // Admin qui a gelé/dégelé le portefeuille (pour traçabilité)
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'frozen_by_admin_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[Groups(['wallet:read'])]
+    private ?User $frozenByAdmin = null;
+
     #[ORM\Column(name: 'updated_at', type: Types::DATETIME_MUTABLE)]
     #[Groups(['wallet:read'])]
     private ?\DateTimeInterface $updatedAt = null;
@@ -153,6 +169,72 @@ class Wallet
     public function setTotalWithdrawn(string $totalWithdrawn): static
     {
         $this->totalWithdrawn = $totalWithdrawn;
+        return $this;
+    }
+
+    public function isFrozen(): bool
+    {
+        return $this->isFrozen;
+    }
+
+    public function setIsFrozen(bool $isFrozen): static
+    {
+        $this->isFrozen = $isFrozen;
+        return $this;
+    }
+
+    public function getFrozenAt(): ?\DateTimeInterface
+    {
+        return $this->frozenAt;
+    }
+
+    public function setFrozenAt(?\DateTimeInterface $frozenAt): static
+    {
+        $this->frozenAt = $frozenAt;
+        return $this;
+    }
+
+    public function getFrozenByAdmin(): ?User
+    {
+        return $this->frozenByAdmin;
+    }
+
+    public function setFrozenByAdmin(?User $frozenByAdmin): static
+    {
+        $this->frozenByAdmin = $frozenByAdmin;
+        return $this;
+    }
+
+    /**
+     * Get the total balance (available + reserved).
+     * This is the net balance that the agency can potentially access.
+     */
+    public function getTotalBalance(): string
+    {
+        return bcadd($this->availableBalance, $this->reservedBalance, 2);
+    }
+
+    /**
+     * Freeze the wallet with admin traceability.
+     */
+    public function freeze(User $admin): static
+    {
+        $this->isFrozen = true;
+        $this->frozenAt = new \DateTime();
+        $this->frozenByAdmin = $admin;
+        $this->touch();
+        return $this;
+    }
+
+    /**
+     * Unfreeze the wallet.
+     */
+    public function unfreeze(): static
+    {
+        $this->isFrozen = false;
+        $this->frozenAt = null;
+        $this->frozenByAdmin = null;
+        $this->touch();
         return $this;
     }
 

@@ -5,6 +5,7 @@ namespace App\Repository;
 use App\Entity\Agent;
 use App\Entity\Agency;
 use App\Entity\Ticket;
+use App\Entity\Trip;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -27,11 +28,11 @@ class TicketRepository extends ServiceEntityRepository
             ->select('COUNT(t.id)')
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
-            ->where('tr.agency = :agency')
+            ->where('t.validatedByAgent = :validatedByAgent')
             ->andWhere('t.status = :status')
             ->andWhere('t.validatedAt >= :start')
             ->andWhere('t.validatedAt <= :end')
-            ->setParameter('agency', $agent->getAgency())
+            ->setParameter('validatedByAgent', $agent->getId())
             ->setParameter('status', 'embarque')
             ->setParameter('start', $start)
             ->setParameter('end', $end)
@@ -69,11 +70,11 @@ class TicketRepository extends ServiceEntityRepository
             ->select('COUNT(t.id)')
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
-            ->where('tr.agency = :agency')
+            ->where('t.validatedByAgent = :validatedByAgent')
             ->andWhere('t.status = :status')
             ->andWhere('t.validatedAt >= :start')
             ->andWhere('t.validatedAt <= :end')
-            ->setParameter('agency', $agent->getAgency())
+            ->setParameter('validatedByAgent', $agent->getId())
             ->setParameter('status', 'embarque')
             ->setParameter('start', $start)
             ->setParameter('end', $end)
@@ -82,11 +83,89 @@ class TicketRepository extends ServiceEntityRepository
     }
 
     /**
+     * Compte les tickets validés pour TOUTE l'agence (tous agents confondus)
+     * sur la période. Sert à calculer un taux de validation cohérent : avant,
+     * ce taux comparait des tickets validés PAR UN SEUL agent à des tickets
+     * en attente de TOUTE l'agence — deux échelles différentes, donnant un
+     * ratio sans signification. Ici numérateur et dénominateur portent tous
+     * les deux sur l'agence entière.
+     */
+    public function countValidatedByAgency(Agency $agency, \DateTime $start, \DateTime $end): int
+    {
+        return (int) ($this->createQueryBuilder('t')
+            ->select('COUNT(t.id)')
+            ->join('t.reservation', 'r')
+            ->join('r.trip', 'tr')
+            ->where('tr.agency = :agency')
+            ->andWhere('t.status = :status')
+            ->andWhere('t.validatedAt >= :start')
+            ->andWhere('t.validatedAt <= :end')
+            ->setParameter('agency', $agency)
+            ->setParameter('status', 'embarque')
+            ->setParameter('start', $start)
+            ->setParameter('end', $end)
+            ->getQuery()
+            ->getSingleScalarResult() ?? 0);
+    }
+
+    /**
+     * Récupère les tickets validés PAR UN AGENT DONNÉ sur la période, avec
+     * leur réservation chargée. Sert à calculer le revenu réellement
+     * attribuable à cet agent (voir StatisticsController::calculateRevenueByAgent),
+     * au lieu du revenu de toute l'agence.
+     */
+    public function findValidatedByAgentWithinPeriod(Agent $agent, \DateTime $start, \DateTime $end): array
+    {
+        return $this->createQueryBuilder('t')
+            ->join('t.reservation', 'r')
+            ->addSelect('r')
+            ->where('t.validatedByAgent = :agent')
+            ->andWhere('t.status = :status')
+            ->andWhere('t.validatedAt >= :start')
+            ->andWhere('t.validatedAt <= :end')
+            ->setParameter('agent', $agent)
+            ->setParameter('status', 'embarque')
+            ->setParameter('start', $start)
+            ->setParameter('end', $end)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Récupère les tickets d'un trajet donné en passant correctement par la
+     * relation Ticket -> Reservation -> Trip.
+     *
+     * 👈 CORRECTIF IMPORTANT : le code appelant faisait auparavant
+     * `findBy(['reservation' => $trip->getId()])`, ce qui compare
+     * `ticket.reservation_id` à l'id d'un Trip — deux séquences d'ID
+     * totalement indépendantes. Ça ne renvoyait donc pas les tickets du
+     * trajet, mais des tickets choisis au hasard par coïncidence numérique
+     * d'id. Cette méthode fait la vraie jointure.
+     */
+    public function findTicketsByTrip(Trip $trip): array
+    {
+        return $this->createQueryBuilder('t')
+            ->join('t.reservation', 'r')
+            ->addSelect('r')
+            ->where('r.trip = :trip')
+            ->setParameter('trip', $trip)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Compte les passagers absent (no-show)
+     *
+     * 👈 CORRIGÉ : comptait les tickets au statut "annule" (= remboursés,
+     * annulés par le client), ce qui n'a rien à voir avec un no-show. Un
+     * no-show est un billet payé et jamais annulé, resté "en_attente" (donc
+     * jamais scanné à l'embarquement) alors que le trajet est déjà parti.
      */
     public function countNoShowPassengers(Agent $agent, \DateTime $start, \DateTime $end): int
     {
-        return $this->createQueryBuilder('t')
+        $now = new \DateTime();
+
+        return (int) ($this->createQueryBuilder('t')
             ->select('COUNT(t.id)')
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
@@ -94,12 +173,16 @@ class TicketRepository extends ServiceEntityRepository
             ->andWhere('t.status = :status')
             ->andWhere('tr.departureTime >= :start')
             ->andWhere('tr.departureTime <= :end')
+            // Un trajet pas encore parti ne peut pas encore avoir de no-show :
+            // le passager a peut-être juste pas encore embarqué.
+            ->andWhere('tr.departureTime < :now')
             ->setParameter('agency', $agent->getAgency())
-            ->setParameter('status', 'annule')
+            ->setParameter('status', 'en_attente')
             ->setParameter('start', $start)
             ->setParameter('end', $end)
+            ->setParameter('now', $now)
             ->getQuery()
-            ->getSingleScalarResult() ?? 0;
+            ->getSingleScalarResult() ?? 0);
     }
 
     /**
@@ -119,5 +202,47 @@ class TicketRepository extends ServiceEntityRepository
             ->setParameter('end', $end)
             ->getQuery()
             ->getSingleScalarResult() ?? 0;
+    }
+
+    /**
+     * Get the total amount of unvalidated ticket reservations for an agency.
+     * This is for calculating the blocked balance: sum of all reservation amounts
+     * where passengers have NOT YET been validated as embarked/boarded.
+     * 
+     * @param Agency $agency The agency to calculate for
+     * @return float The total amount of unvalidated tickets
+     */
+    public function getUnvalidatedTicketsAmountForAgency(Agency $agency): float
+    {
+        $result = $this->createQueryBuilder('t')
+            ->select('SUM(r.totalAmount) as total')
+            ->join('t.reservation', 'r')
+            ->join('r.trip', 'tr')
+            ->where('tr.agency = :agency')
+            ->andWhere('t.status = :status')
+            ->setParameter('agency', $agency)
+            ->setParameter('status', 'en_attente') // Not yet validated/boarded
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return (float) ($result ?? '0.00');
+    }
+
+    /**
+     * Get all unvalidated tickets for an agency (for detailed reporting)
+     */
+    public function findUnvalidatedTicketsForAgency(Agency $agency): array
+    {
+        return $this->createQueryBuilder('t')
+            ->select('t', 'r', 'tr')
+            ->join('t.reservation', 'r')
+            ->join('r.trip', 'tr')
+            ->where('tr.agency = :agency')
+            ->andWhere('t.status = :status')
+            ->setParameter('agency', $agency)
+            ->setParameter('status', 'en_attente')
+            ->orderBy('r.createdAt', 'DESC')
+            ->getQuery()
+            ->getResult();
     }
 }

@@ -16,28 +16,31 @@ class PaymentLogRepository extends ServiceEntityRepository
         parent::__construct($registry, PaymentLog::class);
     }
 
-//    /**
-//     * @return PaymentLog[] Returns an array of PaymentLog objects
-//     */
-//    public function findByExampleField($value): array
-//    {
-//        return $this->createQueryBuilder('p')
-//            ->andWhere('p.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->orderBy('p.id', 'ASC')
-//            ->setMaxResults(10)
-//            ->getQuery()
-//            ->getResult()
-//        ;
-//    }
+    /**
+     * Get total amount of pending refunds.
+     */
+    public function getPendingRefundsAmount(): string
+    {
+        $result = $this->createQueryBuilder('pl')
+            ->select('SUM(pl.amount) as total')
+            ->where('pl.status = :status')
+            ->setParameter('status', 'REFUND_PENDING')
+            ->getQuery()
+            ->getSingleScalarResult();
+        
+        return $result ?? '0.00';
+    }
 
-//    public function findOneBySomeField($value): ?PaymentLog
-//    {
-//        return $this->createQueryBuilder('p')
-//            ->andWhere('p.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->getQuery()
-//            ->getOneOrNullResult()
-//        ;
-//    }
+    /**
+     * Find payment logs with REFUND_PENDING status.
+     */
+    public function findRefundPending(): array
+    {
+        return $this->createQueryBuilder('pl')
+            ->where('pl.status = :status')
+            ->setParameter('status', 'REFUND_PENDING')
+            ->orderBy('pl.createdAt', 'DESC')
+            ->getQuery()
+            ->getResult();
+    }
 }

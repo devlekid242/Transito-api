@@ -206,7 +206,6 @@ class PaymentController extends AbstractController
     }
 
     public function detail(int $id): JsonResponse
-
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);

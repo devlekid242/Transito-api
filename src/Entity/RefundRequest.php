@@ -1,0 +1,264 @@
+<?php
+
+namespace App\Entity;
+
+use ApiPlatform\Metadata\ApiResource;
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
+use App\Repository\RefundRequestRepository;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+use Symfony\Component\Serializer\Attribute\Groups;
+use Symfony\Component\Validator\Constraints as Assert;
+
+#[ORM\Entity(repositoryClass: RefundRequestRepository::class)]
+#[ORM\Table(name: '`refund_requests`')]
+#[ApiResource(
+    normalizationContext: ['groups' => ['refund:read']],
+    denormalizationContext: ['groups' => ['refund:write']],
+    operations: [
+        new GetCollection(),
+        new Get(),
+    ]
+)]
+class RefundRequest
+{
+    // Status constants
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_APPROVED = 'approved';
+    public const STATUS_REJECTED = 'rejected';
+    public const STATUS_COMPLETED = 'completed';
+
+    #[ORM\Id]
+    #[ORM\GeneratedValue]
+    #[ORM\Column]
+    #[Groups(['refund:read'])]
+    private ?int $id = null;
+
+    // L'agence dont le client demande le remboursement
+    #[ORM\ManyToOne(targetEntity: Agency::class)]
+    #[ORM\JoinColumn(name: 'agency_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    #[Groups(['refund:read', 'refund:write'])]
+    private ?Agency $agency = null;
+
+    // La réservation concernée par la demande de remboursement
+    #[ORM\ManyToOne(targetEntity: Reservation::class)]
+    #[ORM\JoinColumn(name: 'reservation_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    #[Groups(['refund:read', 'refund:write'])]
+    private ?Reservation $reservation = null;
+
+    // L'utilisateur (client) qui demande le remboursement
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'requested_by_user_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    #[Groups(['refund:read', 'refund:write'])]
+    private ?User $requestedBy = null;
+
+    // Montant du remboursement demandé
+    #[ORM\Column(name: 'requested_amount', type: Types::DECIMAL, precision: 10, scale: 2)]
+    #[Assert\NotBlank(message: 'Le montant est obligatoire.')]
+    #[Assert\Positive(message: 'Le montant doit être positif.')]
+    #[Groups(['refund:read', 'refund:write'])]
+    private ?string $requestedAmount = null;
+
+    // Montant réellement remboursé (peut être différent si remboursement partiel)
+    #[ORM\Column(name: 'refunded_amount', type: Types::DECIMAL, precision: 10, scale: 2, options: ['default' => '0.00'])]
+    #[Groups(['refund:read'])]
+    private string $refundedAmount = '0.00';
+
+    // Raison de la demande de remboursement
+    #[ORM\Column(name: 'reason', type: Types::TEXT)]
+    #[Assert\NotBlank(message: 'La raison est obligatoire.')]
+    #[Groups(['refund:read', 'refund:write'])]
+    private ?string $reason = null;
+
+    // Statut: pending, approved, rejected, completed
+    #[ORM\Column(length: 50, options: ['default' => self::STATUS_PENDING])]
+    #[Assert\Choice(choices: [self::STATUS_PENDING, self::STATUS_APPROVED, self::STATUS_REJECTED, self::STATUS_COMPLETED])]
+    #[Groups(['refund:read'])]
+    private string $status = self::STATUS_PENDING;
+
+    // Note administrative
+    #[ORM\Column(name: 'admin_note', type: Types::TEXT, nullable: true)]
+    #[Groups(['refund:read'])]
+    private ?string $adminNote = null;
+
+    // L'admin qui a traité cette demande
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'processed_by_admin_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[Groups(['refund:read'])]
+    private ?User $processedByAdmin = null;
+
+    #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
+    #[Groups(['refund:read'])]
+    private ?\DateTimeInterface $createdAt = null;
+
+    #[ORM\Column(name: 'processed_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    #[Groups(['refund:read'])]
+    private ?\DateTimeInterface $processedAt = null;
+
+    public function __construct()
+    {
+        $this->createdAt = new \DateTime();
+    }
+
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
+
+    public function getAgency(): ?Agency
+    {
+        return $this->agency;
+    }
+
+    public function setAgency(?Agency $agency): static
+    {
+        $this->agency = $agency;
+        return $this;
+    }
+
+    public function getReservation(): ?Reservation
+    {
+        return $this->reservation;
+    }
+
+    public function setReservation(?Reservation $reservation): static
+    {
+        $this->reservation = $reservation;
+        return $this;
+    }
+
+    public function getRequestedBy(): ?User
+    {
+        return $this->requestedBy;
+    }
+
+    public function setRequestedBy(?User $requestedBy): static
+    {
+        $this->requestedBy = $requestedBy;
+        return $this;
+    }
+
+    public function getRequestedAmount(): ?string
+    {
+        return $this->requestedAmount;
+    }
+
+    public function setRequestedAmount(string $requestedAmount): static
+    {
+        $this->requestedAmount = $requestedAmount;
+        return $this;
+    }
+
+    public function getRefundedAmount(): string
+    {
+        return $this->refundedAmount;
+    }
+
+    public function setRefundedAmount(string $refundedAmount): static
+    {
+        $this->refundedAmount = $refundedAmount;
+        return $this;
+    }
+
+    public function getReason(): ?string
+    {
+        return $this->reason;
+    }
+
+    public function setReason(string $reason): static
+    {
+        $this->reason = $reason;
+        return $this;
+    }
+
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+
+    public function setStatus(string $status): static
+    {
+        $this->status = $status;
+        return $this;
+    }
+
+    public function getAdminNote(): ?string
+    {
+        return $this->adminNote;
+    }
+
+    public function setAdminNote(?string $adminNote): static
+    {
+        $this->adminNote = $adminNote;
+        return $this;
+    }
+
+    public function getProcessedByAdmin(): ?User
+    {
+        return $this->processedByAdmin;
+    }
+
+    public function setProcessedByAdmin(?User $processedByAdmin): static
+    {
+        $this->processedByAdmin = $processedByAdmin;
+        return $this;
+    }
+
+    public function getCreatedAt(): ?\DateTimeInterface
+    {
+        return $this->createdAt;
+    }
+
+    public function setCreatedAt(\DateTimeInterface $createdAt): static
+    {
+        $this->createdAt = $createdAt;
+        return $this;
+    }
+
+    public function getProcessedAt(): ?\DateTimeInterface
+    {
+        return $this->processedAt;
+    }
+
+    public function setProcessedAt(?\DateTimeInterface $processedAt): static
+    {
+        $this->processedAt = $processedAt;
+        return $this;
+    }
+
+    /**
+     * Check if this refund request is still pending
+     */
+    public function isPending(): bool
+    {
+        return $this->status === self::STATUS_PENDING;
+    }
+
+    /**
+     * Check if this refund request has been approved
+     */
+    public function isApproved(): bool
+    {
+        return $this->status === self::STATUS_APPROVED;
+    }
+
+    /**
+     * Get the net amount that would be debited from the agency wallet
+     * This is the amount that was originally credited to the agency (gross amount - platform fee)
+     */
+    public function getNetAmount(): float
+    {
+        $reservation = $this->getReservation();
+        if (!$reservation) {
+            return 0.0;
+        }
+
+        // The net amount is the reservation total minus platform fee
+        // For simplicity, we use the platform fee constant from WalletService
+        $grossAmount = (float) $reservation->getTotalAmount();
+        $platformFee = 500.00; // Same as WalletService::PLATFORM_FEE
+        
+        return max(0.0, round($grossAmount - $platformFee, 2));
+    }
+}

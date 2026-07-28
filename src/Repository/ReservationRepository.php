@@ -16,28 +16,144 @@ class ReservationRepository extends ServiceEntityRepository
         parent::__construct($registry, Reservation::class);
     }
 
-//    /**
-//     * @return Reservation[] Returns an array of Reservation objects
-//     */
-//    public function findByExampleField($value): array
-//    {
-//        return $this->createQueryBuilder('r')
-//            ->andWhere('r.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->orderBy('r.id', 'ASC')
-//            ->setMaxResults(10)
-//            ->getQuery()
-//            ->getResult()
-//        ;
-//    }
+    /**
+     * Count reservations created today.
+     */
+    public function countReservationsToday(): int
+    {
+        $startOfDay = new \DateTime('today');
+        $endOfDay = new \DateTime('tomorrow');
+        
+        return (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->where('r.createdAt BETWEEN :start AND :end')
+            ->setParameter('start', $startOfDay)
+            ->setParameter('end', $endOfDay)
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
 
-//    public function findOneBySomeField($value): ?Reservation
-//    {
-//        return $this->createQueryBuilder('r')
-//            ->andWhere('r.exampleField = :val')
-//            ->setParameter('val', $value)
-//            ->getQuery()
-//            ->getOneOrNullResult()
-//        ;
-//    }
+    /**
+     * Count reservations created this week.
+     */
+    public function countReservationsThisWeek(): int
+    {
+        $startOfWeek = new \DateTime('this week');
+        $endOfWeek = new \DateTime('next week');
+        
+        return (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->where('r.createdAt BETWEEN :start AND :end')
+            ->setParameter('start', $startOfWeek)
+            ->setParameter('end', $endOfWeek)
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
+
+    /**
+     * Get average fill rate across all trips.
+     * Uses seatsReserved from Trip and capacity from Bus.
+     */
+    public function getAverageFillRate(): float
+    {
+        // Get average fill rate from trips that have a bus assigned
+        $result = $this->createQueryBuilder('r')
+            ->select('AVG(t.seatsReserved) as avgReserved, AVG(b.capacity) as avgCapacity, COUNT(r.id) as count')
+            ->join('r.trip', 't')
+            ->join('t.bus', 'b')
+            ->where('r.paymentStatus = :status')
+            ->setParameter('status', 'paye')
+            ->getQuery()
+            ->getResult();
+        
+        $data = $result[0] ?? [];
+        $avgReserved = (float) ($data['avgReserved'] ?? 0);
+        $avgCapacity = (float) ($data['avgCapacity'] ?? 40); // Default to 40 if no bus capacity
+        
+        if ($avgCapacity === 0) {
+            return 0.0;
+        }
+        
+        return min(100.0, round(($avgReserved / $avgCapacity) * 100, 2));
+    }
+
+    /**
+     * Get cancellation rate percentage.
+     * Uses paymentStatus instead of status since Reservation doesn't have a status field.
+     */
+    public function getCancellationRate(): float
+    {
+        $total = (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+        
+        if ($total === 0) {
+            return 0.0;
+        }
+        
+        // Count reservations with paymentStatus = 'annule' or 'echoue'
+        $cancelled = (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->where('r.paymentStatus IN (:statuses)')
+            ->setParameter('statuses', ['annule', 'echoue'])
+            ->getQuery()
+            ->getSingleScalarResult();
+        
+        return round(($cancelled / $total) * 100, 2);
+    }
+
+    /**
+     * Get payment method distribution.
+     */
+    public function getPaymentMethodDistribution(): array
+    {
+        $results = $this->createQueryBuilder('r')
+            ->select('r.paymentMethod, COUNT(r.id) as count')
+            ->where('r.paymentMethod IS NOT NULL')
+            ->groupBy('r.paymentMethod')
+            ->getQuery()
+            ->getResult();
+        
+        $distribution = [];
+        foreach ($results as $row) {
+            $distribution[$row['paymentMethod']] = (int) $row['count'];
+        }
+        
+        return $distribution;
+    }
+
+    /**
+     * Find top routes by reservations and revenue.
+     */
+    public function findTopRoutes(int $limit = 5): array
+    {
+        return $this->createQueryBuilder('r')
+            ->select("CONCAT(t.departureCity, CONCAT(' -> ', t.arrivalCity)) as route, COUNT(r.id) as reservationCount, SUM(r.totalAmount) as totalAmount")
+            ->join('r.trip', 't')
+            ->where('r.paymentStatus = :status')
+            ->setParameter('status', 'paye')
+            ->groupBy('t.departureCity', 't.arrivalCity') // 👈 On regroupe par les deux villes
+            ->orderBy('totalAmount', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Get reservations count grouped by day for the last 7 days.
+     */
+    public function getReservationsByDay(): array
+    {
+        $startDate = new \DateTime('-7 days');
+        
+        return $this->createQueryBuilder('r')
+            ->select('DATE(r.createdAt) as date, COUNT(r.id) as count')
+            ->where('r.createdAt >= :startDate')
+            ->setParameter('startDate', $startDate)
+            ->groupBy('date') // ✅ Correction : Utilisation de l'alias 'date' à la place de 'DATE(r.createdAt)'
+            ->orderBy('date', 'ASC')
+            ->getQuery()
+            ->getResult();
+    }
 }

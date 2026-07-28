@@ -23,6 +23,80 @@ class NotificationController extends AbstractController
         private AgentRepository $agentRepository
         ) {}
 
+    /**
+     * 👈 NOUVEAU : résout l'agencyId pour N'IMPORTE QUEL agent (admin_agence
+     * OU agent_quai), plus seulement admin_agence comme avant. C'est
+     * cohérent avec PusherAuthController::isChannelAllowed(), qui autorise
+     * déjà tous les agents d'une agence à s'abonner au canal
+     * `private-agency-{id}` — restreindre la lecture REST au seul
+     * admin_agence créait une incohérence : un agent_quai recevait les
+     * notifications d'agence en temps réel (tant que son onglet restait
+     * ouvert) mais ne les revoyait plus jamais après un rafraîchissement de
+     * page.
+     */
+    private function resolveAgencyId(User $user): ?int
+    {
+        if (!$this->isGranted('ROLE_PARTNER') && !$this->isGranted('ROLE_AGENT')) {
+            return null;
+        }
+
+        $agent = $this->agentRepository->findOneBy(['user' => $user]);
+        return $agent?->getAgency()?->getId();
+    }
+
+    /**
+     * 👈 NOUVEAU : construit la requête combinant TOUJOURS les notifications
+     * personnelles de l'utilisateur ET, s'il est agent, les notifications
+     * `agency_all` de son agence — au lieu du OU exclusif précédent qui
+     * faisait disparaître les notifications personnelles d'un admin_agence.
+     */
+    private function buildUserAndAgencyQuery(
+        NotificationRepository $notificationRepository,
+        User $user,
+        bool $unreadOnly,
+    ) {
+        $agencyId = $this->resolveAgencyId($user);
+
+        $qb = $notificationRepository->createQueryBuilder('n')
+            ->where('n.recipientType = :userType AND n.recipientId = :userId')
+            ->setParameter('userType', 'user')
+            ->setParameter('userId', $user->getId());
+
+        if ($agencyId !== null) {
+            $qb->orWhere('n.recipientType = :agencyType AND n.recipientId = :agencyId')
+                ->setParameter('agencyType', 'agency_all')
+                ->setParameter('agencyId', $agencyId);
+        }
+
+        if ($unreadOnly) {
+            // andWhere ici s'applique à l'ensemble du OR grâce aux parenthèses
+            // implicites de Doctrine sur where()/orWhere() enchaînés — on
+            // vérifie qu'aucune des deux branches n'échappe au filtre isRead.
+            $qb->andWhere('n.isRead = 0');
+        }
+
+        return $qb->orderBy('n.createdAt', 'DESC')->getQuery()->getResult();
+    }
+
+    /**
+     * 👈 NOUVEAU : un agent peut agir sur une notification si c'est la
+     * sienne en propre, OU si c'est une notification `agency_all` de sa
+     * propre agence (pas celle d'une autre agence).
+     */
+    private function canAccessNotification(Notification $notification, User $user): bool
+    {
+        if ($notification->getRecipientType() === 'user') {
+            return $notification->getRecipientId() === $user->getId();
+        }
+
+        if ($notification->getRecipientType() === 'agency_all') {
+            $agencyId = $this->resolveAgencyId($user);
+            return $agencyId !== null && $notification->getRecipientId() === $agencyId;
+        }
+
+        return false;
+    }
+
     #[Route('', name: 'api_notifications_list', methods: ['GET'])]
     public function index(NotificationRepository $notificationRepository): JsonResponse
     {
@@ -31,10 +105,9 @@ class NotificationController extends AbstractController
             return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $notifications = $notificationRepository->findBy(
-            ['recipientType' => 'user', 'recipientId' => $user->getId()],
-            ['createdAt' => 'DESC']
-        );
+        // 👈 CORRIGÉ : avant, un admin_agence perdait toutes ses notifications
+        // personnelles (remplacées par les seules notifications d'agence).
+        $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, false);
 
         $data = array_map(fn($notif) => $this->normalizer->normalize($notif), $notifications);
         return $this->json($data);
@@ -132,10 +205,7 @@ class NotificationController extends AbstractController
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
-        $notifications = $notificationRepository->findBy(
-            ['recipientType' => 'user', 'recipientId' => $user->getId(), 'isRead' => 0],
-            ['createdAt' => 'DESC']
-        );
+        $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
         $data = array_map(fn($notif) => $this->normalizer->normalize($notif), $notifications);
         return $this->json($data);
@@ -147,13 +217,9 @@ class NotificationController extends AbstractController
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
-        $count = $notificationRepository->count([
-            'recipientType' => 'user',
-            'recipientId' => $user->getId(),
-            'isRead' => 0,
-        ]);
+        $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
-        return $this->json(['count' => $count]);
+        return $this->json(['count' => count($notifications)]);
     }
 
     #[Route('/{id}/read', name: 'api_notifications_mark_read', methods: ['PATCH'])]
@@ -163,10 +229,19 @@ class NotificationController extends AbstractController
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
         $notification = $notificationRepository->find($id);
-        if (!$notification || $notification->getRecipientType() !== 'user' || $notification->getRecipientId() !== $user->getId()) {
+        // 👈 CORRIGÉ : avant, seule une notification 'user' pouvait être
+        // marquée lue — une notification 'agency_all' de sa propre agence
+        // renvoyait un 404, alors qu'elle pouvait désormais apparaître dans
+        // index()/unread() depuis le correctif ci-dessus.
+        if (!$notification || !$this->canAccessNotification($notification, $user)) {
             return $this->json(['message' => 'Notification introuvable.'], Response::HTTP_NOT_FOUND);
         }
 
+        // ⚠️ Rappel d'architecture : `isRead` est une colonne partagée sur
+        // une notification 'agency_all'. La marquer lue ici la fait
+        // disparaître de la liste "non lues" pour TOUS les agents de
+        // l'agence, pas seulement celui qui vient de cliquer. Un vrai suivi
+        // par-agent demanderait une table de jointure dédiée.
         $notification->setIsRead(1);
         $em->flush();
 
@@ -179,11 +254,7 @@ class NotificationController extends AbstractController
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
-        $notifications = $notificationRepository->findBy([
-            'recipientType' => 'user',
-            'recipientId' => $user->getId(),
-            'isRead' => 0,
-        ]);
+        $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
         foreach ($notifications as $notification) {
             $notification->setIsRead(1);
@@ -206,8 +277,20 @@ class NotificationController extends AbstractController
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
         $notification = $notificationRepository->find($id);
-        if (!$notification || $notification->getRecipientType() !== 'user' || $notification->getRecipientId() !== $user->getId()) {
+        if (!$notification || !$this->canAccessNotification($notification, $user)) {
             return $this->json(['message' => 'Notification introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        // 👈 NOUVEAU : supprimer une notification 'agency_all' l'efface pour
+        // TOUTE l'agence (ressource partagée, contrairement à une notif
+        // 'user' qui n'appartient qu'à soi). On réserve donc cette action
+        // destructive à l'admin_agence — un agent_quai peut la marquer lue
+        // (voir markRead()) mais pas la supprimer pour tout le monde.
+        if ($notification->getRecipientType() === 'agency_all') {
+            $agent = $this->agentRepository->findOneBy(['user' => $user]);
+            if (!$agent || $agent->getAgentRole() !== 'admin_agence') {
+                return $this->json(['message' => "Seul l'administrateur de l'agence peut supprimer cette notification."], Response::HTTP_FORBIDDEN);
+            }
         }
 
         $em->remove($notification);

@@ -141,8 +141,14 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[ORM\Column(name: 'password_reset_expires_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $passwordResetExpiresAt = null;
 
+    #[ORM\Column(name: 'last_login_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $lastLoginAt = null;
+
     #[ORM\Column(name: 'profile_photo_url', length: 500, nullable: true)]
     private ?string $profilePhotoUrl = null;
+
+    #[ORM\OneToOne(mappedBy: 'user', targetEntity: Admin::class, cascade: ['persist'])]
+    private ?Admin $admin = null;
 
     public function __construct()
     {
@@ -244,15 +250,43 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
         return (string) $this->phoneNumber;
     }
 
+    public function getAdmin(): ?Admin
+    {
+        return $this->admin;
+    }
+
+    public function setAdmin(?Admin $admin): static
+    {
+        $this->admin = $admin;
+        return $this;
+    }
+
     /**
      * @see UserInterface
      */
     public function getRoles(): array
     {
         $roles = $this->roles;
+
+        // Dérive les rôles Symfony depuis l'entité Admin (source de vérité unique)
+        if ($this->admin && $this->admin->getStatus() === 'active') {
+            $roles[] = 'ROLE_ADMIN';
+            $roles[] = 'ROLE_' . $this->admin->getAdminRole(); // ex: ROLE_SUPER_ADMIN
+        }
+
         $roles[] = 'ROLE_USER';
         return array_unique($roles);
     }
+
+    // /**
+    //  * @see UserInterface
+    //  */
+    // public function getRoles(): array
+    // {
+    //     $roles = $this->roles;
+    //     $roles[] = 'ROLE_USER';
+    //     return array_unique($roles);
+    // }
 
     public function setRoles(array $roles): static
     {
@@ -347,6 +381,17 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function setPasswordResetExpiresAt(?\DateTimeInterface $expiresAt): static
     {
         $this->passwordResetExpiresAt = $expiresAt;
+        return $this;
+    }
+
+    public function getLastLoginAt(): ?\DateTimeInterface
+    {
+        return $this->lastLoginAt;
+    }
+
+    public function setLastLoginAt(?\DateTimeInterface $lastLoginAt): static
+    {
+        $this->lastLoginAt = $lastLoginAt;
         return $this;
     }
 

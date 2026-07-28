@@ -10,6 +10,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\Patch;
+use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\GetCollection;
 use App\Controller\TicketController;
 
@@ -25,19 +26,27 @@ use App\Controller\TicketController;
             controller: TicketController::class . '::list',
             name: 'api_tickets_list'
         ),
+        // Correction : pointait vers "getAvailableTickets", inexistante -> 404/500 garanti.
+        // La méthode existe maintenant dans le contrôleur (liste les billets 'en_attente').
         new GetCollection(
             uriTemplate: '/tickets/available',
             controller: TicketController::class . '::getAvailableTickets',
             name: 'api_tickets_available'
         ),
-        new Get(
+        // Correction : la validation est une MUTATION (change le statut du billet),
+        // elle ne doit jamais être exposée en GET. Alignée sur la vraie route native
+        // PATCH /api/tickets/{id}/validate -> validateById().
+        new Patch(
             uriTemplate: '/tickets/{id}/validate',
-            controller: TicketController::class . '::validateTicket',
+            controller: TicketController::class . '::validateById',
             name: 'api_tickets_validate'
         ),
-        new Patch(
+        // Correction : pointait vers "validateTicketByQrCode", inexistante.
+        // Alignée sur la vraie méthode "validate()" (scan QR ou saisie manuelle),
+        // qui répond en POST côté route native.
+        new Post(
             uriTemplate: '/tickets/validate',
-            controller: TicketController::class . '::validateTicketByQrCode',
+            controller: TicketController::class . '::validate',
             name: 'api_tickets_validate_by_qr_code'
         ),
         new Get(

@@ -4,8 +4,10 @@ namespace App\Controller;
 
 use App\Entity\User;
 use App\Entity\Agent;
+use App\Entity\Admin;
 use App\Repository\UserRepository;
 use App\Repository\AgentRepository;
+use App\Repository\AdminRepository;
 use App\Service\RefreshTokenService;
 use App\Service\TwilioService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -25,9 +27,11 @@ class AuthController extends AbstractController
         Request $request,
         UserRepository $userRepository,
         AgentRepository $agentRepository,
+        AdminRepository $adminRepository,
         UserPasswordHasherInterface $passwordHasher,
         JWTTokenManagerInterface $jwtManager,
-        RefreshTokenService $refreshTokenService
+        RefreshTokenService $refreshTokenService,
+        EntityManagerInterface $em
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
         if (!is_array($payload)) {
@@ -37,8 +41,6 @@ class AuthController extends AbstractController
         $phoneNumber = $payload['phoneNumber'] ?? null;
         $email = $payload['email'] ?? null;
         $password = $payload['password'] ?? null;
-
-        // Accept either phoneNumber or email as identifier for login
         $identifier = $phoneNumber ?? $email;
 
         if (!$identifier || !$password) {
@@ -55,11 +57,22 @@ class AuthController extends AbstractController
             return $this->json(['message' => 'Identifiants invalides.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        $agent = $agentRepository->findOneBy(['user' => $user]);
+        $admin = $adminRepository->findByUser($user);
+
+        if ($admin) {
+            if ($admin->getStatus() !== 'active') {
+                return $this->json(['message' => 'Compte administrateur suspendu ou inactif.'], Response::HTTP_FORBIDDEN);
+            }
+            $admin->setLastLoginAt(new \DateTime());
+            $em->flush();
+        }
+
+        $user->setLastLoginAt(new \DateTime());
+        $em->flush();
+
         $token = $jwtManager->create($user);
         $refreshToken = $refreshTokenService->issueForUser($user);
-
-        // Check if user is also an agent
-        $agent = $agentRepository->findOneBy(['user' => $user]);
 
         $userData = [
             'id' => $user->getId(),
@@ -78,6 +91,15 @@ class AuthController extends AbstractController
                     'id' => $agent->getAgency()->getId(),
                     'name' => $agent->getAgency()->getName(),
                 ] : null,
+            ];
+        }
+
+        if ($admin) {
+            $userData['admin'] = [
+                'adminRole' => $admin->getAdminRole(),
+                'status' => $admin->getStatus(),
+                'permissions' => $admin->getPermissions() ?? [],
+                'department' => $admin->getDepartment(),
             ];
         }
 

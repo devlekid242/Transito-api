@@ -75,21 +75,117 @@ class PartnerFinanceController extends AbstractController
         }
 
         $totalTrips = count($trips);
-        $totalPassengers = 0;
-        $grossRevenue = 0.0;
+        $reservationIds = array_map(fn(Reservation $r) => $r->getId(), $reservations);
+
+        // ------------------------------------------------------------------
+        // Classification des réservations
+        // ------------------------------------------------------------------
+        // r.paymentStatus bascule sur 'rembourse' DÈS l'annulation côté client
+        // (BookingController::cancel()), AVANT que l'admin ait réellement
+        // traité le remboursement (PaymentController::refund(), qui seul
+        // débite le wallet via WalletService::debitForRefund()). Entre les
+        // deux, un PaymentLog de remboursement existe avec le statut
+        // 'REFUND_PENDING' : l'argent est toujours dans available_balance
+        // mais en sursis. Sans distinguer ce cas, les stats donnaient
+        // l'impression qu'un solde était "propre" alors qu'une partie est
+        // en réalité déjà promise à un remboursement.
+        //
+        // On récupère donc, en une seule requête, le dernier PaymentLog de
+        // type remboursement (REFUND_PENDING ou REFUNDED) pour chaque
+        // réservation annulée de cette agence.
+        $refundStatusByReservation = [];
+        if (!empty($reservationIds)) {
+            $refundLogs = $this->em->getRepository(PaymentLog::class)->createQueryBuilder('pl')
+                ->select('IDENTITY(pl.reservation) as reservationId, pl.status as status')
+                ->where('pl.reservation IN (:ids)')
+                ->andWhere('pl.status IN (:statuses)')
+                ->setParameter('ids', $reservationIds)
+                ->setParameter('statuses', ['REFUND_PENDING', 'REFUNDED'])
+                ->getQuery()
+                ->getArrayResult();
+            foreach ($refundLogs as $row) {
+                // REFUND_PENDING doit l'emporter si les deux existent pour une
+                // même réservation (ne devrait pas arriver en pratique, mais
+                // on privilégie l'état le plus "prudent").
+                $reservationId = (int) $row['reservationId'];
+                if (!isset($refundStatusByReservation[$reservationId]) || $row['status'] === 'REFUND_PENDING') {
+                    $refundStatusByReservation[$reservationId] = $row['status'];
+                }
+            }
+        }
+
+        $grossRevenue = 0.0;      // Montant des réservations actuellement confirmées (payées, non annulées)
+        $activeReservationIds = []; // Sert de périmètre cohérent pour le calcul de la commission plateforme
+
+        $reservationsByStatus = [
+            'enAttentePaiement' => 0,             // paiement pas encore confirmé
+            'confirmees' => 0,                    // payées et toujours actives
+            'echouees' => 0,                      // paiement en échec
+            'annuleesRemboursementEnAttente' => 0, // annulées, remboursement pas encore traité par l'admin
+            'annuleesRembourseesConfirmees' => 0,  // annulées, remboursement déjà versé par l'admin
+            'annuleesSansPaiementPrealable' => 0,  // annulées mais aucun paiement n'avait été effectué
+        ];
 
         foreach ($reservations as $reservation) {
-            $totalPassengers += count($reservation->getTickets() ?? []);
-            if ($reservation->getPaymentStatus() === 'paye') {
-                $grossRevenue += (float) $reservation->getTotalAmount();
+            $status = $reservation->getPaymentStatus();
+            $id = $reservation->getId();
+
+            switch ($status) {
+                case 'paye':
+                    $reservationsByStatus['confirmees']++;
+                    $grossRevenue += (float) $reservation->getTotalAmount();
+                    $activeReservationIds[] = $id;
+                    break;
+
+                case 'en_attente':
+                    $reservationsByStatus['enAttentePaiement']++;
+                    break;
+
+                case 'echoue':
+                    $reservationsByStatus['echouees']++;
+                    break;
+
+                case 'rembourse':
+                    $refundStatus = $refundStatusByReservation[$id] ?? null;
+                    if ($refundStatus === 'REFUND_PENDING') {
+                        $reservationsByStatus['annuleesRemboursementEnAttente']++;
+                    } elseif ($refundStatus === 'REFUNDED') {
+                        $reservationsByStatus['annuleesRembourseesConfirmees']++;
+                    } else {
+                        // Annulée sans qu'aucun paiement n'ait été confirmé au préalable
+                        // (voir BookingController::cancel() : $wasPaid === false) : rien à
+                        // rembourser, donc pas de PaymentLog de remboursement.
+                        $reservationsByStatus['annuleesSansPaiementPrealable']++;
+                    }
+                    break;
             }
         }
 
         $balanceAvailable = (float) $wallet->getAvailableBalance();
         $balancePending = (float) $wallet->getReservedBalance();
 
-        $reservationIds = array_map(fn(Reservation $r) => $r->getId(), $reservations);
-        if (empty($reservationIds)) {
+        // Montant actuellement dans available_balance mais qui sera débité dès
+        // que l'admin traitera les remboursements en attente : à afficher comme
+        // un solde "à risque", distinct du solde bloqué pour retrait (reserved).
+        $pendingRefundsAmount = (float) ($this->em->getRepository(PaymentLog::class)->createQueryBuilder('pl')
+            ->select('COALESCE(SUM(pl.amount), 0)')
+            ->join('pl.reservation', 'r2')
+            ->join('r2.trip', 't2')
+            ->where('t2.agency = :agency')
+            ->andWhere('pl.status = :pendingStatus')
+            ->setParameter('agency', $agency)
+            ->setParameter('pendingStatus', 'REFUND_PENDING')
+            ->getQuery()
+            ->getSingleScalarResult());
+        $pendingRefundsAmount = round($pendingRefundsAmount, 2);
+
+        // La commission plateforme est calculée UNIQUEMENT sur le périmètre des
+        // réservations actuellement actives (confirmées et non annulées) : c'est
+        // exactement le même périmètre que $grossRevenue, ce qui garantit que
+        // netRevenue = grossRevenue - platformFees reste cohérent. Inclure les
+        // commissions de réservations depuis annulées gonflerait artificiellement
+        // les frais déduits par rapport au chiffre d'affaires réellement actif.
+        if (empty($activeReservationIds)) {
             $platformFees = 0.0;
         } else {
             $platformFees = (float) $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
@@ -99,28 +195,46 @@ class PartnerFinanceController extends AbstractController
                 ->andWhere('wt.reservation IN (:reservationIds)')
                 ->andWhere('w.type = :platformType')
                 ->setParameter('source', WalletTransaction::SOURCE_PLATFORM_FEE)
-                ->setParameter('reservationIds', $reservationIds)
+                ->setParameter('reservationIds', $activeReservationIds)
                 ->setParameter('platformType', Wallet::TYPE_PLATFORM)
                 ->getQuery()
                 ->getSingleScalarResult();
             $platformFees = round($platformFees, 2);
         }
 
+        $grossRevenue = round($grossRevenue, 2);
         $netRevenue = max(0.0, round($grossRevenue - $platformFees, 2));
 
+        // Les billets annulés ('annule', produits par BookingController::cancel())
+        // ne doivent compter ni dans le nombre de passagers "actifs" ni dans le
+        // dénominateur du taux d'embarquement : ce sont des sièges libérés, pas
+        // des passagers en attente d'embarquement. On les isole explicitement au
+        // lieu de les mélanger avec les billets 'en_attente' réellement à venir.
         $ticketStats = $this->em->getRepository(Ticket::class)->createQueryBuilder('tk')
-            ->select('SUM(CASE WHEN tk.status = :boarded THEN 1 ELSE 0 END) as boardedCount, COUNT(tk.id) as totalCount')
+            ->select(
+                'SUM(CASE WHEN tk.status = :boarded THEN 1 ELSE 0 END) as boardedCount, ' .
+                'SUM(CASE WHEN tk.status = :cancelled THEN 1 ELSE 0 END) as cancelledCount, ' .
+                'COUNT(tk.id) as totalCount'
+            )
             ->join('tk.reservation', 'r')
             ->join('r.trip', 't')
             ->where('t.agency = :agency')
             ->setParameter('agency', $agency)
             ->setParameter('boarded', 'embarque')
+            ->setParameter('cancelled', 'annule')
             ->getQuery()
             ->getOneOrNullResult();
 
         $boardedCount = (int) ($ticketStats['boardedCount'] ?? 0);
+        $cancelledTicketCount = (int) ($ticketStats['cancelledCount'] ?? 0);
         $ticketCount = (int) ($ticketStats['totalCount'] ?? 0);
-        $boardingRate = $ticketCount > 0 ? round(($boardedCount / $ticketCount) * 100, 2) : 0.0;
+        // Univers pertinent pour le taux d'embarquement : billets encore valides
+        // (en_attente + embarque), les annulés étant hors-jeu par définition.
+        $validTicketCount = $ticketCount - $cancelledTicketCount;
+        $boardingRate = $validTicketCount > 0 ? round(($boardedCount / $validTicketCount) * 100, 2) : 0.0;
+
+        $totalPassengers = $ticketCount;       // Historique complet (tous billets jamais émis)
+        $activePassengers = $validTicketCount; // Billets encore valides (hors annulations)
 
         $pendingWithdrawals = $this->em->getRepository(WithdrawalRequest::class)->count([
             'agency' => $agency,
@@ -218,16 +332,28 @@ class PartnerFinanceController extends AbstractController
             'revenueChange' => '0%',
             'activeTrips' => $totalTrips,
             'totalPassengers' => $totalPassengers,
+            'activePassengers' => $activePassengers,
             'boardingRate' => $boardingRate,
+            // Détail des réservations par statut réel, en distinguant explicitement
+            // les annulations dont le remboursement est encore en attente de
+            // traitement par l'admin de celles déjà soldées (voir classification
+            // plus haut). Permet au partenaire de comprendre pourquoi son solde
+            // disponible peut encore inclure de l'argent "en sursis".
+            'reservationsByStatus' => $reservationsByStatus,
             'balance' => [
-                'available' => $balanceAvailable,
-                'pending' => $balancePending,
+                'available' => round($balanceAvailable, 2),
+                'pending' => round($balancePending, 2),
+                // Part du solde disponible qui correspond à des remboursements
+                // demandés mais pas encore validés par l'admin : ce montant sera
+                // débité dès leur traitement, il ne doit pas être perçu comme
+                // définitivement acquis.
+                'atRisk' => $pendingRefundsAmount,
                 'pendingTransactions' => $pendingWithdrawals,
             ],
             'recentTransactions' => $recentActivity,
             'withdrawals' => array_map(fn(WithdrawalRequest $w) => [
                 'id' => $w->getId(),
-                'amount' => $w->getAmount(),
+                'amount' => round((float) $w->getAmount(), 2),
                 'status' => $w->getStatus(),
                 'method' => $w->getMethod(),
                 'createdAt' => $w->getCreatedAt()?->format('c'),
@@ -380,11 +506,15 @@ class PartnerFinanceController extends AbstractController
 
         $wallet = $this->walletService->getOrCreateWallet($agency);
         $available = (float) $wallet->getAvailableBalance();
+        $pendingRefundAmount = $this->getPendingRefundAmount($agency);
+        $effectiveAvailable = max(0.0, $available - $pendingRefundAmount);
 
-        if ($amount > $available) {
+        if ($amount > $effectiveAvailable) {
             return new JsonResponse([
-                'message' => 'Solde insuffisant.',
+                'message' => 'Retrait bloqué : votre solde disponible est déjà engagé par des remboursements en attente de réservation.',
                 'available' => $available,
+                'pendingRefunds' => round($pendingRefundAmount, 2),
+                'effectiveAvailable' => round($effectiveAvailable, 2),
             ], Response::HTTP_BAD_REQUEST);
         }
 
@@ -424,6 +554,22 @@ class PartnerFinanceController extends AbstractController
             'available' => (float) $wallet->getAvailableBalance(),
             'pending' => (float) $wallet->getReservedBalance(),
         ], Response::HTTP_CREATED);
+    }
+
+    private function getPendingRefundAmount(Agency $agency): float
+    {
+        $pendingRefundAmount = $this->em->getRepository(PaymentLog::class)->createQueryBuilder('pl')
+            ->select('COALESCE(SUM(pl.amount), 0)')
+            ->join('pl.reservation', 'r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->andWhere('pl.status = :pendingStatus')
+            ->setParameter('agency', $agency)
+            ->setParameter('pendingStatus', 'REFUND_PENDING')
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return round((float) $pendingRefundAmount, 2);
     }
 
     public function listWithdrawals(Request $request): JsonResponse

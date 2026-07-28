@@ -375,13 +375,20 @@ class BookingController extends AbstractController
         $bus = $trip->getBus();
         $capacity = $bus ? $bus->getCapacity() : null;
 
-        // fetch already taken seats for this trip
+        // 👈 CORRIGÉ : cette requête ne filtrait ni les billets 'annule' ni les
+        // réservations 'rembourse' — un siège libéré par annulation restait
+        // donc marqué "already_taken" indéfiniment, avec exactement le même
+        // symptôme que le bug de seatsReserved jamais décrémenté (voir cancel()).
         $qb = $this->em->getRepository(Ticket::class)->createQueryBuilder('t')
             ->select('t.seatNumber')
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
             ->where('tr.id = :trip')
-            ->setParameter('trip', $tripId);
+            ->andWhere('t.status != :cancelledTicket')
+            ->andWhere('r.paymentStatus != :cancelledReservation')
+            ->setParameter('trip', $tripId)
+            ->setParameter('cancelledTicket', 'annule')
+            ->setParameter('cancelledReservation', 'rembourse');
         $results = $qb->getQuery()->getArrayResult();
         $taken = array_map(fn($r) => (int)$r['seatNumber'], $results);
 
@@ -412,20 +419,30 @@ class BookingController extends AbstractController
     }
 
     /**
-     * Annulation d'une réservation par le client.
+     * Annulation d'une réservation par le client (ou un admin, en support).
      *
      * Règles métier :
-     *  - Seul le propriétaire de la réservation (ou un admin) peut l'annuler.
+     *  - Le propriétaire de la réservation OU un ROLE_ADMIN peut l'annuler.
      *  - Impossible d'annuler une réservation déjà annulée/remboursée.
-     *  - L'annulation n'est autorisée que jusqu'à 24h avant le départ du voyage.
+     *  - L'annulation n'est autorisée que jusqu'à 24h avant le départ du
+     *    voyage — SAUF si le trajet lui-même a été annulé par l'agence, auquel
+     *    cas le client doit toujours pouvoir se faire rembourser sans limite
+     *    de délai (ce n'est plus de son fait).
      *
-     * Effets, dans une seule transaction :
+     * Effets, dans une seule transaction (verrou pessimiste sur le trajet,
+     * comme dans create(), pour éviter toute race condition sur seatsReserved) :
      *  1) Reservation.paymentStatus -> 'rembourse'
      *  2) Tous les Ticket liés -> status 'annule' (invalides, non scannables)
-     *  3) Un PaymentLog de type remboursement est créé avec le statut
-     *     'REFUND_PENDING' afin que l'équipe administrative soit informée
-     *     et puisse déclencher le remboursement réel (cf. PaymentController::refund()).
-     *  4) Une notification est envoyée au client.
+     *  3) 👈 CORRIGÉ : trip.seatsReserved décrémenté du nombre de billets
+     *     annulés — c'était l'écart symétrique à create() qui manquait
+     *     totalement, et qui faisait qu'un trajet ne libérait jamais ses
+     *     places après une annulation.
+     *  4) 👈 CORRIGÉ : un PaymentLog de remboursement n'est créé QUE si la
+     *     réservation avait réellement été payée (paymentStatus === 'paye').
+     *     Avant, un remboursement était demandé même pour une réservation
+     *     jamais payée (en_attente), ce qui n'a pas de sens et polluait la
+     *     file d'attente de remboursements admin.
+     *  5) Une notification est envoyée au client (et à l'agence).
      */
     #[Route('/api/bookings/{id}/cancel', name: 'cancel_booking', methods: ['POST'])]
     public function cancel(int $id, Request $request): JsonResponse
@@ -435,9 +452,15 @@ class BookingController extends AbstractController
             return new JsonResponse(['error' => 'Réservation introuvable.'], 404);
         }
 
-        // --- Autorisation : seul le propriétaire de la réservation peut l'annuler ---
+        // --- Autorisation : propriétaire de la réservation OU admin ---
+        // 👈 CORRIGÉ : le docblock promettait un accès admin qui n'existait
+        // pas dans le code — un admin ne pouvait pas annuler pour un client
+        // en cas de litige/support.
+        /** @var User|null $user */
         $user = $this->getUser();
-        if (!$reservation->getUser() || !$user instanceof User || $reservation->getUser()->getId() !== $user->getId()) {
+        $isOwner = $reservation->getUser() && $user instanceof User && $reservation->getUser()->getId() === $user->getId();
+        $isAdmin = $user instanceof User && $this->isGranted('ROLE_ADMIN');
+        if (!$isOwner && !$isAdmin) {
             return new JsonResponse(['error' => "Vous n'êtes pas autorisé à annuler cette réservation."], 403);
         }
 
@@ -446,17 +469,45 @@ class BookingController extends AbstractController
             return new JsonResponse(['error' => 'Cette réservation a déjà été annulée.'], 409);
         }
 
-        // --- Règle des 24h avant le départ ---
+        // --- 👈 NOUVEAU : blocage absolu si au moins un billet a déjà été
+        // embarqué (scanné par un agent). Contrairement à la règle des 24h,
+        // cette règle ne souffre AUCUNE exception (même si le trajet a été
+        // annulé par l'agence après coup) : on ne peut pas rembourser un
+        // passager qui est physiquement monté dans le bus. Sans ce contrôle,
+        // un client pouvait embarquer puis annuler sa réservation après coup
+        // pour se faire rembourser un voyage déjà effectué.
+        $existingTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+        $hasBoardedTicket = false;
+        foreach ($existingTickets as $existingTicket) {
+            if ($existingTicket->getStatus() === 'embarque') {
+                $hasBoardedTicket = true;
+                break;
+            }
+        }
+        if ($hasBoardedTicket) {
+            return new JsonResponse([
+                'error' => "Cette réservation ne peut plus être annulée : au moins un billet a déjà été validé à l'embarquement.",
+            ], 409);
+        }
+
         $trip = $reservation->getTrip();
         $departureTime = $trip?->getDepartureTime();
         if (!$departureTime) {
             return new JsonResponse(['error' => "Impossible de déterminer l'heure de départ de ce voyage."], 422);
         }
 
+        // --- Règle des 24h avant le départ ---
+        // 👈 CORRIGÉ : si le trajet a été annulé par l'agence (voir
+        // TripController::update()/delete()), le client doit TOUJOURS
+        // pouvoir se faire rembourser, quel que soit le délai restant —
+        // avant, un client se faisait bloquer par cette règle pour une
+        // annulation qui n'était pas de son fait.
+        $tripCancelledByAgency = $trip->getStatus() === 'annule';
+
         $now = new \DateTime();
         $hoursBeforeDeparture = ($departureTime->getTimestamp() - $now->getTimestamp()) / 3600;
 
-        if ($hoursBeforeDeparture < self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE) {
+        if (!$tripCancelledByAgency && $hoursBeforeDeparture < self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE) {
             return new JsonResponse([
                 'error' => sprintf(
                     "L'annulation n'est possible que jusqu'à %dh avant l'embarquement.",
@@ -467,74 +518,119 @@ class BookingController extends AbstractController
         }
 
         $data = json_decode($request->getContent(), true) ?? [];
-        $reason = trim((string)($data['reason'] ?? '')) ?: "Annulation à l'initiative du client";
+        $reason = trim((string)($data['reason'] ?? '')) ?: ($tripCancelledByAgency
+            ? "Trajet annulé par l'agence"
+            : "Annulation à l'initiative du client");
 
-        // 1) Réservation -> remboursée / annulée
-        $reservation->setPaymentStatus('rembourse');
-        $this->em->persist($reservation);
+        // 👈 NOUVEAU : transaction + verrou pessimiste sur le trajet, symétrique
+        // à create(). Nécessaire maintenant que cancel() modifie lui aussi
+        // trip.seatsReserved — sans verrou, une annulation et une nouvelle
+        // réservation concurrentes sur le même trajet pourraient se marcher
+        // dessus (race condition classique lecture-modification-écriture).
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
 
-        // 2) Tous les billets liés -> annulés (invalides, plus scannables/validables)
-        $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
-        foreach ($tickets as $ticket) {
-            $ticket->setStatus('annule');
-            $this->em->persist($ticket);
+        try {
+            $lockedTrip = $this->em->getRepository(Trip::class)->find($trip->getId(), LockMode::PESSIMISTIC_WRITE);
+
+            // 👈 IMPORTANT : capturé AVANT toute mutation — sert à décider plus
+            // bas si un remboursement réel est dû (voir point 4 du docblock).
+            $wasPaid = $reservation->getPaymentStatus() === 'paye';
+
+            // 1) Réservation -> remboursée / annulée
+            $reservation->setPaymentStatus('rembourse');
+            $this->em->persist($reservation);
+
+            // 2) Tous les billets liés -> annulés (invalides, plus scannables/validables)
+            $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+            foreach ($tickets as $ticket) {
+                $ticket->setStatus('annule');
+                $this->em->persist($ticket);
+            }
+
+            // 3) 👈 NOUVEAU : libération effective des places sur le trajet.
+            if ($lockedTrip) {
+                $freedSeats = count($tickets);
+                $lockedTrip->setSeatsReserved(max(0, $lockedTrip->getSeatsReserved() - $freedSeats));
+                $this->em->persist($lockedTrip);
+            }
+
+            // 4) 👈 CORRIGÉ : remboursement demandé UNIQUEMENT si un paiement
+            // avait réellement été effectué avant l'annulation.
+            $refundLog = null;
+            $refundAmount = null;
+
+            if ($wasPaid) {
+                $refundAmount = (float)$reservation->getTotalAmount() - self::SERVICE_FEE;
+                $refundLog = new PaymentLog();
+                $refundLog->setReservation($reservation);
+                $refundLog->setOperator($reservation->getPaymentMethod() ?? 'N/A');
+                $refundLog->setReference(uniqid('refund_', true));
+                $refundLog->setAmount((string)$refundAmount);
+                $refundLog->setStatus('REFUND_PENDING');
+                $refundLog->setRawResponse(json_encode([
+                    'type' => 'refund_request',
+                    'reason' => $reason,
+                    'requested_at' => $now->format('c'),
+                    'requested_by_user_id' => $user->getId(),
+                    'original_transaction_reference' => $reservation->getTransactionReference(),
+                ]));
+                $this->em->persist($refundLog);
+            }
+
+            // 5) Notification au client
+            // 👈 Garde de sécurité : reservation->getUser() est vérifié non-null
+            // seulement dans le cas $isOwner ; si un admin annule une réservation
+            // dont l'utilisateur serait null (cas limite), on ne plante pas.
+            $notification = null;
+            if ($reservation->getUser()) {
+                $notification = new Notification();
+                $notification->setRecipientType('user')
+                    ->setRecipientId($reservation->getUser()->getId())
+                    ->setTitle('Réservation annulée')
+                    ->setContent($refundAmount !== null
+                        ? sprintf(
+                            'Votre réservation pour le trajet %s → %s a été annulée. Le remboursement de %s FCFA est en cours de traitement par notre équipe.',
+                            $trip->getDepartureCity(),
+                            $trip->getArrivalCity(),
+                            $refundAmount,
+                        )
+                        : sprintf(
+                            'Votre réservation pour le trajet %s → %s a été annulée.',
+                            $trip->getDepartureCity(),
+                            $trip->getArrivalCity(),
+                        ))
+                    ->setCategory('BOOKING');
+                $this->em->persist($notification);
+            }
+
+            $agencyNotification = null;
+            if ($trip->getAgency()) {
+                $agencyNotification = new Notification();
+                $agencyNotification->setRecipientType('agency_all')
+                    ->setRecipientId($trip->getAgency()->getId())
+                    ->setTitle('Réservation annulée par un client')
+                    ->setContent(sprintf(
+                        'Une réservation a été annulée sur le trajet %s → %s du %s (%d siège(s) libéré(s)).',
+                        $trip->getDepartureCity(),
+                        $trip->getArrivalCity(),
+                        $departureTime->format('d/m/Y à H:i'),
+                        count($tickets),
+                    ))
+                    ->setCategory('BOOKING');
+                $this->em->persist($agencyNotification);
+            }
+
+            $this->em->flush();
+            $connection->commit();
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
         }
 
-        // 3) Transaction de remboursement à traiter par l'administration
-        $refundAmount = (float)$reservation->getTotalAmount() - self::SERVICE_FEE;
-        $refundLog = new PaymentLog();
-        $refundLog->setReservation($reservation);
-        $refundLog->setOperator($reservation->getPaymentMethod() ?? 'N/A');
-        $refundLog->setReference(uniqid('refund_', true));
-        $refundLog->setAmount((string)$refundAmount);
-        $refundLog->setStatus('REFUND_PENDING');
-        $refundLog->setRawResponse(json_encode([
-            'type' => 'refund_request',
-            'reason' => $reason,
-            'requested_at' => $now->format('c'),
-            // $user est garanti non-null ici grâce à la vérification d'autorisation ci-dessus.
-            'requested_by_user_id' => $user->getId(),
-            'original_transaction_reference' => $reservation->getTransactionReference(),
-        ]));
-        $this->em->persist($refundLog);
-
-        // 4) Notification au client
-        $notification = new Notification();
-        $notification->setRecipientType('user')
-            ->setRecipientId($user->getId())
-            ->setTitle('Réservation annulée')
-            ->setContent(sprintf(
-                'Votre réservation pour le trajet %s → %s a été annulée. Le remboursement de %s FCFA est en cours de traitement par notre équipe.',
-                $trip->getDepartureCity(),
-                $trip->getArrivalCity(),
-                $refundAmount,
-            ))
-            ->setCategory('BOOKING');
-        $this->em->persist($notification);
-
-        // 👈 NOUVEAU : l'agence n'était jamais informée qu'un client venait
-        // d'annuler, alors que ça libère un siège sur SON trajet — utile pour
-        // qu'un autre client puisse le reprendre sans attendre un
-        // rafraîchissement manuel du dashboard partenaire.
-        $agencyNotification = null;
-        if ($trip->getAgency()) {
-            $agencyNotification = new Notification();
-            $agencyNotification->setRecipientType('agency_all')
-                ->setRecipientId($trip->getAgency()->getId())
-                ->setTitle('Réservation annulée par un client')
-                ->setContent(sprintf(
-                    'Une réservation a été annulée sur le trajet %s → %s du %s (%d siège(s) libéré(s)).',
-                    $trip->getDepartureCity(),
-                    $trip->getArrivalCity(),
-                    $departureTime->format('d/m/Y à H:i'),
-                    count($tickets),
-                ))
-                ->setCategory('BOOKING');
-            $this->em->persist($agencyNotification);
+        if ($notification) {
+            $this->notificationBroadcaster->broadcast($notification);
         }
-
-        $this->em->flush();
-        $this->notificationBroadcaster->broadcast($notification);
         if ($agencyNotification) {
             $this->notificationBroadcaster->broadcast($agencyNotification);
         }
@@ -544,12 +640,14 @@ class BookingController extends AbstractController
             'reservationId' => $reservation->getId(),
             'paymentStatus' => $reservation->getPaymentStatus(),
             'ticketsCancelled' => count($tickets),
-            'refund' => [
+            'refund' => $refundLog ? [
                 'reference' => $refundLog->getReference(),
                 'status' => $refundLog->getStatus(),
                 'amount' => $refundLog->getAmount(),
-            ],
-            'message' => 'Réservation annulée. Le remboursement est en cours de traitement par notre équipe.',
+            ] : null,
+            'message' => $refundLog
+                ? 'Réservation annulée. Le remboursement est en cours de traitement par notre équipe.'
+                : 'Réservation annulée. Aucun paiement n\'avait été effectué, aucun remboursement n\'est nécessaire.',
         ], 200);
     }
 
@@ -598,6 +696,12 @@ class BookingController extends AbstractController
         $departureDate = $departureTime ? $departureTime->format('Y-m-d') : null;
         $bus = $trip?->getBus();
 
+        // 👈 NOUVEAU : un billet déjà embarqué (scanné par un agent) rend la
+        // réservation définitivement non-annulable, quel que soit le délai
+        // restant avant le départ. Sans ce contrôle, le front affichait un
+        // bouton "Annuler" actif pour un voyage déjà effectué.
+        $hasBoardedTicket = !empty(array_filter($tickets, fn($t) => $t->getStatus() === 'embarque'));
+
         return [
             'id' => $reservation->getId(),
             'tripId' => $trip?->getId(),
@@ -608,7 +712,7 @@ class BookingController extends AbstractController
             'seatNumber' => implode(', ', $seatNumbers),
             'totalPrice' => (float)$reservation->getTotalAmount(),
             'status' => $status,
-            'canCancel' => $status !== 'Annulé' && $status !== 'Expiré' && $trip && $trip->getDepartureTime() && (($trip->getDepartureTime()->getTimestamp() - (new \DateTime())->getTimestamp()) / 3600) > self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE,
+            'canCancel' => !$hasBoardedTicket && $status !== 'Annulé' && $status !== 'Expiré' && $trip && $trip->getDepartureTime() && (($trip->getDepartureTime()->getTimestamp() - (new \DateTime())->getTimestamp()) / 3600) > self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE,
             'bookingDate' => $departureTime ? $departureTime->format('c') : $reservation->getCreatedAt()?->format('c'),
             'trip' => $trip ? [
                 'id' => $trip->getId(),

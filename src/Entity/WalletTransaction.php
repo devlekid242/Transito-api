@@ -43,6 +43,14 @@ class WalletTransaction
     public const SOURCE_WITHDRAWAL_RELEASED = 'WITHDRAWAL_RELEASED';
     // Ajustement manuel (litige, correction...)
     public const SOURCE_ADJUSTMENT = 'ADJUSTMENT';
+    
+    // Ajustement manuel par admin (crédit ou débit manuel)
+    public const SOURCE_ADMIN_CREDIT = 'ADMIN_CREDIT';
+    public const SOURCE_ADMIN_DEBIT = 'ADMIN_DEBIT';
+    
+    // Gel/dégel de portefeuille
+    public const SOURCE_WALLET_FREEZE = 'WALLET_FREEZE';
+    public const SOURCE_WALLET_UNFREEZE = 'WALLET_UNFREEZE';
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -89,6 +97,17 @@ class WalletTransaction
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     #[Groups(['wallet_tx:read'])]
     private ?string $description = null;
+
+    // Admin qui a effectué cette transaction (pour les ajustements manuels)
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'admin_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    #[Groups(['wallet_tx:read'])]
+    private ?User $admin = null;
+
+    // Justification/raison pour les ajustements manuels
+    #[ORM\Column(name: 'admin_reason', type: Types::TEXT, nullable: true)]
+    #[Groups(['wallet_tx:read'])]
+    private ?string $adminReason = null;
 
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['wallet_tx:read'])]
@@ -206,5 +225,27 @@ class WalletTransaction
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function getAdmin(): ?User
+    {
+        return $this->admin;
+    }
+
+    public function setAdmin(?User $admin): static
+    {
+        $this->admin = $admin;
+        return $this;
+    }
+
+    public function getAdminReason(): ?string
+    {
+        return $this->adminReason;
+    }
+
+    public function setAdminReason(?string $adminReason): static
+    {
+        $this->adminReason = $adminReason;
+        return $this;
     }
 }
