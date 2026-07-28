@@ -5,6 +5,7 @@ namespace App\Controller;
 use App\Entity\Baggage;
 use App\Entity\Notification;
 use App\Entity\PaymentLog;
+use App\Entity\RefundRequest;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
 use App\Entity\Trip;
@@ -576,6 +577,17 @@ class BookingController extends AbstractController
                     'original_transaction_reference' => $reservation->getTransactionReference(),
                 ]));
                 $this->em->persist($refundLog);
+
+                // 👈 NOUVEAU : création de la demande de remboursement associée
+                // dans la table dédiée refund_requests, pour suivi et traitement
+                // côté admin (AdminRefundController).
+                $refundRequest = new RefundRequest();
+                $refundRequest->setAgency($trip->getAgency());
+                $refundRequest->setReservation($reservation);
+                $refundRequest->setRequestedBy($user);
+                $refundRequest->setRequestedAmount((string)$refundAmount);
+                $refundRequest->setReason($reason);
+                $this->em->persist($refundRequest);
             }
 
             // 5) Notification au client

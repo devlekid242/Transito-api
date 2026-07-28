@@ -18,6 +18,8 @@ use App\Repository\SupportTicketRepository;
 use App\Repository\UserRepository;
 use App\Repository\AgentRepository;
 use App\Repository\WalletTransactionRepository;
+use App\Repository\RefundRequestRepository;
+use App\Repository\TicketRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -45,6 +47,8 @@ class AdminDashboardController extends AbstractController
         private WalletTransactionRepository $walletTransactionRepository,
         private PaymentLogRepository $paymentLogRepository,
         private SupportTicketRepository $supportTicketRepository,
+        private RefundRequestRepository $refundRequestRepository,
+        private TicketRepository $ticketRepository,
     ) {}
 
     /**
@@ -68,6 +72,10 @@ class AdminDashboardController extends AbstractController
         // Financial metrics
         $totalBalanceLocked = $this->walletRepository->getTotalReservedBalance();
         $totalBalanceAvailable = $this->walletRepository->getTotalAvailableBalance();
+        $totalBlockedBalance = $this->walletRepository->getTotalBlockedBalance(
+            $this->refundRequestRepository,
+            $this->ticketRepository
+        );
         $platformRevenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
         $pendingRefundsAmount = $this->paymentLogRepository->getPendingRefundsAmount();
         
@@ -103,6 +111,7 @@ class AdminDashboardController extends AbstractController
                 'finance' => [
                     'totalBalanceLocked' => (float) $totalBalanceLocked,
                     'totalBalanceAvailable' => (float) $totalBalanceAvailable,
+                    'totalBlockedBalance' => (float) $totalBlockedBalance,
                     'platformRevenue' => (float) $platformRevenue,
                     'pendingRefunds' => (float) $pendingRefundsAmount,
                 ],
