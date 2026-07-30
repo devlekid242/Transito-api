@@ -3,6 +3,7 @@
 namespace App\Repository;
 
 use App\Entity\WalletTransaction;
+use App\Entity\Wallet;
 use DateTimeInterface;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
@@ -18,15 +19,18 @@ class WalletTransactionRepository extends ServiceEntityRepository
     }
 
     /**
-     * Get platform revenue (sum of all platform fees) within a date range.
+     * Total des commissions récoltées par la plateforme
      */
     public function getPlatformRevenue(DateTimeInterface $startDate, DateTimeInterface $endDate): string
     {
         $result = $this->createQueryBuilder('wt')
             ->select('SUM(wt.amount) as total')
+            ->join('wt.wallet', 'w')
             ->where('wt.source = :source')
+            ->andWhere('w.type = :walletType')
             ->andWhere('wt.createdAt BETWEEN :start AND :end')
             ->setParameter('source', WalletTransaction::SOURCE_PLATFORM_FEE)
+            ->setParameter('walletType', Wallet::TYPE_PLATFORM)
             ->setParameter('start', $startDate)
             ->setParameter('end', $endDate)
             ->getQuery()
@@ -36,38 +40,33 @@ class WalletTransactionRepository extends ServiceEntityRepository
     }
 
     /**
-     * Get revenue chart data grouped by period.
-     * Returns array with labels and series data.
+     * Données du graphique basées sur l'extraction d'année/mois native DQL
      */
     public function getRevenueChartData(DateTimeInterface $startDate, DateTimeInterface $endDate, string $period = 'monthly'): array
     {
-        $groupBy = $this->getGroupByExpression($period);
-
-        $query = $this->createQueryBuilder('wt')
-            ->select($groupBy . ' as period, SUM(wt.amount) as revenue')
+        $qb = $this->createQueryBuilder('wt')
             ->where('wt.source = :source')
             ->andWhere('wt.createdAt BETWEEN :start AND :end')
             ->setParameter('source', WalletTransaction::SOURCE_PLATFORM_FEE)
             ->setParameter('start', $startDate)
-            ->setParameter('end', $endDate)
-            ->groupBy('period') // 👈 CORRECTION ICI : Utiliser l'alias 'period' au lieu de $groupBy
-            ->orderBy('period', 'ASC');
+            ->setParameter('end', $endDate);
 
-        $results = $query->getQuery()->getResult();
+        if ($period === 'daily') {
+            $qb->select("SUBSTRING(wt.createdAt, 1, 10) as period, SUM(wt.amount) as revenue");
+        } else {
+            $qb->select("SUBSTRING(wt.createdAt, 1, 7) as period, SUM(wt.amount) as revenue");
+        }
+
+        $results = $qb->groupBy('period')
+            ->orderBy('period', 'ASC')
+            ->getQuery()
+            ->getResult();
 
         $labels = [];
         $revenueSeries = [];
 
         foreach ($results as $row) {
-            $periodVal = $row['period'] ?? null;
-
-            // Gestion propre string / DateTime pour les labels
-            if ($periodVal instanceof \DateTimeInterface) {
-                $labels[] = $periodVal->format('Y-m-d');
-            } else {
-                $labels[] = (string) $periodVal;
-            }
-
+            $labels[] = (string) $row['period'];
             $revenueSeries[] = (float) ($row['revenue'] ?? 0);
         }
 
@@ -77,21 +76,15 @@ class WalletTransactionRepository extends ServiceEntityRepository
         ];
     }
 
-    /**
-     * Get the group by expression based on period.
-     */
-    private function getGroupByExpression(string $period): string
+
+    public function getGroupByExpression(string $period, string $alias = 'wt'): string
     {
-        switch ($period) {
-            case 'daily':
-                return 'DATE(wt.createdAt)';
-            case 'weekly':
-                return 'YEARWEEK(wt.createdAt, 1)';
-            case 'monthly':
-            default:
-                // Cotes simples strictes autour du format MySQL : '%Y-%m'
-                return "DATE_FORMAT(wt.createdAt, '%Y-%m')";
-        }
+        return match ($period) {
+            'daily' => sprintf('SUBSTRING(%s.createdAt, 1, 10)', $alias),
+            'weekly' => sprintf('SUBSTRING(%s.createdAt, 1, 7)', $alias),
+            'monthly' => sprintf('SUBSTRING(%s.createdAt, 1, 7)', $alias),
+            default => sprintf('SUBSTRING(%s.createdAt, 1, 7)', $alias),
+        };
     }
 
     /**

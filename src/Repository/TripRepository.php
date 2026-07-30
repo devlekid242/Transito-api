@@ -134,4 +134,22 @@ class TripRepository extends ServiceEntityRepository
             ->getQuery()
             ->getResult();
     }
+
+    /**
+     * Get top routes by agency.
+     */
+    public function getTopRoutesByAgency($agency, int $limit = 5): array
+    {
+        return $this->createQueryBuilder('t')
+            ->select("CONCAT(t.departureCity, CONCAT(' -> ', t.arrivalCity)) as route, COUNT(t.id) as reservationCount, SUM(t.price * t.seatsReserved) as totalRevenue, AVG((t.seatsReserved * 100) / b.capacity) as fillRate")
+            ->join('t.bus', 'b')
+            ->where('t.agency = :agency')
+            ->andWhere('b.capacity > 0')
+            ->setParameter('agency', $agency)
+            ->groupBy('t.departureCity', 't.arrivalCity')
+            ->orderBy('totalRevenue', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
 }

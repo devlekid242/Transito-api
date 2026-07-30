@@ -86,9 +86,32 @@ class Wallet
     #[Groups(['wallet:read'])]
     private ?\DateTimeInterface $updatedAt = null;
 
+    /**
+     * 👈 NOUVEAU (audit intégrité financière) : verrouillage optimiste.
+     * Aucune mutation de solde (WalletService, AdminWalletController,
+     * AdminRefundController, AdminWithdrawalController) ne verrouillait la
+     * ligne wallet — deux écritures concurrentes (ex: deux demandes de
+     * retrait créées en même temps, ou un crédit manuel admin en même temps
+     * qu'un remboursement) pouvaient toutes deux lire le même solde de
+     * départ et écraser silencieusement l'une des deux mises à jour.
+     * Avec #[ORM\Version], Doctrine lève une OptimisticLockException sur la
+     * seconde écriture concurrente au lieu de la perdre silencieusement —
+     * à traiter (retry) dans les contrôleurs appelants.
+     * Nécessite une migration ajoutant la colonne `version` (INT NOT NULL
+     * DEFAULT 1) à la table `wallets`.
+     */
+    #[ORM\Version]
+    #[ORM\Column(type: Types::INTEGER)]
+    private int $version = 1;
+
     public function __construct()
     {
         $this->updatedAt = new \DateTime();
+    }
+
+    public function getVersion(): int
+    {
+        return $this->version;
     }
 
     public function getId(): ?int

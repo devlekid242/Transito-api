@@ -99,6 +99,21 @@ class PaymentLog
     #[Groups(['payment:read'])]
     private ?\DateTimeInterface $createdAt = null;
 
+    /**
+     * 👈 NOUVEAU : date à laquelle ce log a quitté son état PENDING initial
+     * (SUCCESS, FAILED, REFUNDED, REFUNDED_COMPLETED, REFUNDED_FORCE...).
+     * Manquait totalement auparavant : createdAt seul ne permet pas de
+     * distinguer "quand la transaction a été initiée" de "quand elle a été
+     * validée/rejetée", ce qui empêchait tout suivi correct du délai de
+     * traitement d'un paiement/remboursement. Renseigné par
+     * PaymentController::confirm() et PaymentController::refund().
+     * Nécessite une migration ajoutant la colonne `processed_at`
+     * (DATETIME NULL) à la table `payment_logs`.
+     */
+    #[ORM\Column(name: 'processed_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    #[Groups(['payment:read'])]
+    private ?\DateTimeInterface $processedAt = null;
+
     public function __construct()
     {
         $this->createdAt = new \DateTime();
@@ -178,5 +193,16 @@ class PaymentLog
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function getProcessedAt(): ?\DateTimeInterface
+    {
+        return $this->processedAt;
+    }
+
+    public function setProcessedAt(?\DateTimeInterface $processedAt): static
+    {
+        $this->processedAt = $processedAt;
+        return $this;
     }
 }

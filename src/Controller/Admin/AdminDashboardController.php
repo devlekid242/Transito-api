@@ -10,6 +10,7 @@ use App\Entity\PaymentLog;
 use App\Entity\SupportTicket;
 use App\Entity\User;
 use App\Repository\AgencyRepository;
+use App\Repository\AdminRepository;
 use App\Repository\ReservationRepository;
 use App\Repository\WithdrawalRequestRepository;
 use App\Repository\WalletRepository;
@@ -39,6 +40,7 @@ class AdminDashboardController extends AbstractController
         private EntityManagerInterface $em,
         private SerializerInterface $serializer,
         private AgencyRepository $agencyRepository,
+        private AdminRepository $adminRepository,
         private UserRepository $userRepository,
         private AgentRepository $agentRepository,
         private ReservationRepository $reservationRepository,
@@ -365,14 +367,16 @@ class AdminDashboardController extends AbstractController
     public function getUserDistribution(): JsonResponse
     {
         $totalUsers = $this->userRepository->count([]);
-        $totalAgents = $this->userRepository->count(['roles' => 'AGENT']);
-        $totalClients = $totalUsers - $totalAgents;
+        $totalAgents = $this->agentRepository->count([]);
+        $totalAdmin = $this->adminRepository->count([]);
+        $totalClients = $totalUsers - ( $totalAgents + $totalAdmin);
         
         return $this->json([
             'success' => true,
             'data' => [
                 ['label' => 'Clients', 'value' => $totalClients, 'color' => '#2563eb'],
                 ['label' => 'Agents', 'value' => $totalAgents, 'color' => '#16a34a'],
+                ['label' => 'Administratuers', 'value' => $totalAdmin, 'color' => '#9b1818'],
             ],
         ]);
     }

@@ -539,7 +539,7 @@ class BookingController extends AbstractController
             $wasPaid = $reservation->getPaymentStatus() === 'paye';
 
             // 1) Réservation -> remboursée / annulée
-            $reservation->setPaymentStatus('rembourse');
+            $reservation->setPaymentStatus('annule');
             $this->em->persist($reservation);
 
             // 2) Tous les billets liés -> annulés (invalides, plus scannables/validables)
@@ -677,6 +677,9 @@ class BookingController extends AbstractController
         $status = 'En attente';
         if ($reservation->getPaymentStatus() === 'rembourse') {
             // Une réservation annulée reste "Annulé" même si le voyage est déjà passé.
+            $status = 'Remboursé';
+        } elseif ($reservation->getPaymentStatus() === 'annule') {
+
             $status = 'Annulé';
         } elseif ($trip->getDepartureTime() < new \DateTime()) {
             $status = 'Expiré';

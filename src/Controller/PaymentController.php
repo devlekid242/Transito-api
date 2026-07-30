@@ -14,6 +14,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 class PaymentController extends AbstractController
 {
@@ -31,15 +32,25 @@ class PaymentController extends AbstractController
 
         $data = json_decode($request->getContent(), true) ?? [];
         $reservationId = $data['reservationId'] ?? $data['reservation_id'] ?? null;
-        $amount = $data['amount'] ?? null;
         $method = $data['paymentMethod'] ?? $data['payment_method'] ?? 'Mobile Money';
 
-        if (!$reservationId || !$amount) {
-            return new JsonResponse(['error' => 'reservationId and amount are required'], 400);
+        if (!$reservationId) {
+            return new JsonResponse(['error' => 'reservationId is required'], 400);
         }
 
         $reservation = $this->em->getRepository(Reservation::class)->find($reservationId);
         if (!$reservation) return new JsonResponse(['error' => 'Reservation not found'], 404);
+
+        // 👈 CORRIGÉ (audit intégrité) : le montant du PaymentLog était
+        // auparavant celui envoyé par le client (`$data['amount']`), non
+        // vérifié. Le crédit réel du portefeuille (creditForReservationPayment)
+        // se base bien sur reservation.totalAmount côté serveur, donc le
+        // grand livre lui-même n'était pas corruptible — mais le PaymentLog
+        // (utilisé pour les reçus, l'historique et la réconciliation admin)
+        // pouvait afficher un montant différent de ce qui était réellement dû.
+        // On recalcule désormais TOUJOURS depuis la réservation, seule
+        // source de vérité, comme le fait déjà BookingController::create().
+        $amount = $reservation->getTotalAmount();
 
         $log = new PaymentLog();
         $log->setReservation($reservation);
@@ -66,6 +77,24 @@ class PaymentController extends AbstractController
         ], 201);
     }
 
+    /**
+     * ⚠️ AUDIT SÉCURITÉ — NON CORRIGÉ ICI, À TRAITER AVANT PRODUCTION :
+     * Cette méthode marque un paiement SUCCESS sur la seule base de l'appel
+     * du client, sans AUCUNE vérification côté opérateur Mobile Money (pas
+     * de webhook signé, pas d'appel à l'API MTN/Airtel pour confirmer que
+     * l'argent a réellement été transféré). En l'état, un client peut
+     * appeler initiate() puis confirm() immédiatement et obtenir une
+     * réservation "payée" + un crédit réel sur le portefeuille de l'agence
+     * sans qu'aucun argent n'ait changé de mains. Ce endpoint doit être
+     * remplacé par un webhook vérifié par signature (ou un appel serveur à
+     * serveur vers l'opérateur) avant mise en production — cf. rapport
+     * d'audit, finding "HIGH — Payment confirmation trusts the client".
+     *
+     * Le correctif ci-dessous ajoute uniquement une garde de TRANSITION
+     * D'ÉTAT : on ne peut plus "confirmer" un paiement déjà remboursé /
+     * annulé, ce qui n'a pas de sens métier et pouvait re-créditer une
+     * réservation déjà soldée.
+     */
     public function confirm(Request $request): JsonResponse
     {
 
@@ -77,11 +106,27 @@ class PaymentController extends AbstractController
         $log = $repo->findOneBy(['reference' => $tx]);
         if (!$log) return new JsonResponse(['error' => 'Transaction not found'], 404);
 
+        // 👈 NOUVEAU : une transaction déjà remboursée/annulée ne doit jamais
+        // pouvoir être "re-confirmée" — cela recréditerait une réservation
+        // déjà soldée en sens inverse du remboursement.
+        $terminalStatuses = ['REFUNDED', 'REFUNDED_COMPLETED', 'REFUNDED_FORCE', 'FAILED'];
+        if (in_array($log->getStatus(), $terminalStatuses, true)) {
+            return new JsonResponse([
+                'error' => sprintf('Cette transaction est déjà dans un état final (%s) et ne peut plus être confirmée.', $log->getStatus()),
+            ], 409);
+        }
+
         // Idempotence : si ce paiement est déjà marqué SUCCESS, ne pas re-créditer le portefeuille
         $alreadyConfirmed = $log->getStatus() === 'SUCCESS';
 
         // Simulate confirmation: mark success unless explicitly failed
         $log->setStatus('SUCCESS');
+        // 👈 NOUVEAU : on ne pose processedAt que la première fois qu'on
+        // quitte PENDING — un second appel idempotent ($alreadyConfirmed)
+        // ne doit pas réécrire la date de validation d'origine.
+        if (!$alreadyConfirmed) {
+            $log->setProcessedAt(new \DateTime());
+        }
         $raw = ['confirmed_at' => (new \DateTime())->format('c'), 'payload' => $data];
         $log->setRawResponse(json_encode($raw));
 
@@ -205,10 +250,28 @@ class PaymentController extends AbstractController
         return new JsonResponse($out, 200);
     }
 
+    /**
+     * 👈 CORRIGÉ (audit sécurité — IDOR) : cette action ne vérifiait
+     * auparavant AUCUNE propriété ni rôle, contrairement à history() qui
+     * scope correctement sur l'utilisateur connecté. N'importe quel
+     * utilisateur authentifié pouvait donc consulter le PaymentLog (y
+     * compris le rawResponse brut de l'opérateur) de n'importe quelle
+     * réservation en devinant/énumérant des id.
+     */
     public function detail(int $id): JsonResponse
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
+
+        $currentUser = $this->getUser();
+        $isOwner = $currentUser instanceof User
+            && $log->getReservation()?->getUser()
+            && $log->getReservation()->getUser()->getId() === $currentUser->getId();
+        $isAdmin = $currentUser instanceof User && $this->isGranted('ROLE_ADMIN');
+
+        if (!$isOwner && !$isAdmin) {
+            return new JsonResponse(['error' => 'Not found'], 404);
+        }
 
         return new JsonResponse([
             'id' => $log->getId(),
@@ -217,19 +280,41 @@ class PaymentController extends AbstractController
             'operator' => $log->getOperator(),
             'reference' => $log->getReference(),
             'status' => $log->getStatus(),
-            'rawResponse' => $log->getRawResponse(),
+            // rawResponse (payload brut de l'opérateur) réservé aux admins
+            'rawResponse' => $isAdmin ? $log->getRawResponse() : null,
             'createdAt' => $log->getCreatedAt()?->format('c')
         ], 200);
     }
 
+    /**
+     * 👈 CORRIGÉ (audit sécurité) : action réservée aux admins désormais.
+     * Elle déclenche un débit réel du portefeuille d'une agence
+     * (WalletService::debitForRefund) — elle ne doit en aucun cas être
+     * accessible à un utilisateur standard.
+     */
+    #[IsGranted('ROLE_ADMIN')]
     public function refund(int $id, Request $request): JsonResponse
     {
         $log = $this->em->getRepository(PaymentLog::class)->find($id);
         if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
+
+        // 👈 NOUVEAU : ne rembourser qu'une transaction réellement payée
+        // (SUCCESS) ou explicitement en attente de remboursement
+        // (REFUND_PENDING, cas normal issu de BookingController::cancel()).
+        // Empêche de "rembourser" un log encore PENDING (jamais confirmé) ou
+        // déjà REFUNDED/FAILED.
+        $refundableStatuses = ['SUCCESS', 'REFUND_PENDING'];
+        if (!in_array($log->getStatus(), $refundableStatuses, true)) {
+            return new JsonResponse([
+                'error' => sprintf('Cette transaction (statut: %s) ne peut pas être remboursée.', $log->getStatus()),
+            ], 409);
+        }
+
         $data = json_decode($request->getContent(), true) ?? [];
         $reason = $data['reason'] ?? 'requested_by_user';
 
         $log->setStatus('REFUNDED');
+        $log->setProcessedAt(new \DateTime());
         $raw = json_decode($log->getRawResponse() ?? '{}', true);
         $raw['refund'] = ['reason' => $reason, 'at' => (new \DateTime())->format('c')];
         $log->setRawResponse(json_encode($raw));

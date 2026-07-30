@@ -3,6 +3,7 @@
 namespace App\Repository;
 
 use App\Entity\Reservation;
+use App\Entity\Agency;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
@@ -23,7 +24,7 @@ class ReservationRepository extends ServiceEntityRepository
     {
         $startOfDay = new \DateTime('today');
         $endOfDay = new \DateTime('tomorrow');
-        
+
         return (int) $this->createQueryBuilder('r')
             ->select('COUNT(r.id)')
             ->where('r.createdAt BETWEEN :start AND :end')
@@ -40,7 +41,7 @@ class ReservationRepository extends ServiceEntityRepository
     {
         $startOfWeek = new \DateTime('this week');
         $endOfWeek = new \DateTime('next week');
-        
+
         return (int) $this->createQueryBuilder('r')
             ->select('COUNT(r.id)')
             ->where('r.createdAt BETWEEN :start AND :end')
@@ -65,15 +66,15 @@ class ReservationRepository extends ServiceEntityRepository
             ->setParameter('status', 'paye')
             ->getQuery()
             ->getResult();
-        
+
         $data = $result[0] ?? [];
         $avgReserved = (float) ($data['avgReserved'] ?? 0);
         $avgCapacity = (float) ($data['avgCapacity'] ?? 40); // Default to 40 if no bus capacity
-        
+
         if ($avgCapacity === 0) {
             return 0.0;
         }
-        
+
         return min(100.0, round(($avgReserved / $avgCapacity) * 100, 2));
     }
 
@@ -87,11 +88,11 @@ class ReservationRepository extends ServiceEntityRepository
             ->select('COUNT(r.id)')
             ->getQuery()
             ->getSingleScalarResult();
-        
+
         if ($total === 0) {
             return 0.0;
         }
-        
+
         // Count reservations with paymentStatus = 'annule' or 'echoue'
         $cancelled = (int) $this->createQueryBuilder('r')
             ->select('COUNT(r.id)')
@@ -99,7 +100,7 @@ class ReservationRepository extends ServiceEntityRepository
             ->setParameter('statuses', ['annule', 'echoue'])
             ->getQuery()
             ->getSingleScalarResult();
-        
+
         return round(($cancelled / $total) * 100, 2);
     }
 
@@ -114,13 +115,26 @@ class ReservationRepository extends ServiceEntityRepository
             ->groupBy('r.paymentMethod')
             ->getQuery()
             ->getResult();
-        
+
         $distribution = [];
         foreach ($results as $row) {
             $distribution[$row['paymentMethod']] = (int) $row['count'];
         }
-        
+
         return $distribution;
+    }
+
+    // Dans ReservationRepository.php
+    public function findRecentByAgency(Agency $agency, int $limit = 10): array
+    {
+        return $this->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency)
+            ->orderBy('r.createdAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
     }
 
     /**
@@ -146,7 +160,7 @@ class ReservationRepository extends ServiceEntityRepository
     public function getReservationsByDay(): array
     {
         $startDate = new \DateTime('-7 days');
-        
+
         return $this->createQueryBuilder('r')
             ->select('DATE(r.createdAt) as date, COUNT(r.id) as count')
             ->where('r.createdAt >= :startDate')
@@ -155,5 +169,113 @@ class ReservationRepository extends ServiceEntityRepository
             ->orderBy('date', 'ASC')
             ->getQuery()
             ->getResult();
+    }
+
+    /**
+     * Count reservations by agency.
+     */
+    public function countReservationsByAgency($agency, \DateTimeInterface $startDate = null, \DateTimeInterface $endDate = null): int
+    {
+        $qb = $this->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency);
+
+        if ($startDate) {
+            $qb->andWhere('r.createdAt >= :startDate')->setParameter('startDate', $startDate);
+        }
+
+        if ($endDate) {
+            $qb->andWhere('r.createdAt <= :endDate')->setParameter('endDate', $endDate);
+        }
+
+        return (int) $qb->select('COUNT(r.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
+
+    /**
+     * Get total revenue by agency.
+     */
+    public function getTotalRevenueByAgency($agency, \DateTimeInterface $startDate = null, \DateTimeInterface $endDate = null): float
+    {
+        $qb = $this->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency)
+            ->andWhere('r.paymentStatus = :status')
+            ->setParameter('status', 'paye');
+
+        if ($startDate) {
+            $qb->andWhere('r.createdAt >= :startDate')->setParameter('startDate', $startDate);
+        }
+
+        if ($endDate) {
+            $qb->andWhere('r.createdAt <= :endDate')->setParameter('endDate', $endDate);
+        }
+
+        $result = $qb->select('SUM(r.totalAmount) as total')
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return (float) ($result ?? 0);
+    }
+
+    /**
+     * Get average fill rate by agency.
+     */
+    public function getAverageFillRateByAgency($agency): float
+    {
+        $result = $this->createQueryBuilder('r')
+            ->select('AVG(t.seatsReserved) as avgReserved, AVG(b.capacity) as avgCapacity, COUNT(r.id) as count')
+            ->join('r.trip', 't')
+            ->join('t.bus', 'b')
+            ->where('t.agency = :agency')
+            ->andWhere('r.paymentStatus = :status')
+            ->setParameter('agency', $agency)
+            ->setParameter('status', 'paye')
+            ->getQuery()
+            ->getResult();
+
+        $data = $result[0] ?? [];
+        $avgReserved = (float) ($data['avgReserved'] ?? 0);
+        $avgCapacity = (float) ($data['avgCapacity'] ?? 40); // Default to 40 if no bus capacity
+
+        if ($avgCapacity === 0) {
+            return 0.0;
+        }
+
+        return min(100.0, round(($avgReserved / $avgCapacity) * 100, 2));
+    }
+
+    /**
+     * Get cancellation rate by agency.
+     */
+    public function getCancellationRateByAgency($agency): float
+    {
+        $total = (int) $this->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->setParameter('agency', $agency)
+            ->select('COUNT(r.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        if ($total === 0) {
+            return 0.0;
+        }
+
+        // Count reservations with paymentStatus = 'annule' or 'echoue'
+        $cancelled = (int) $this->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->where('t.agency = :agency')
+            ->andWhere('r.paymentStatus IN (:statuses)')
+            ->setParameter('agency', $agency)
+            ->setParameter('statuses', ['annule', 'echoue'])
+            ->select('COUNT(r.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return round(($cancelled / $total) * 100, 2);
     }
 }

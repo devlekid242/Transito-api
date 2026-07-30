@@ -26,7 +26,7 @@ class AdminFixtures extends Fixture
         $superAdminUser->setQuartier('Centre-ville');
         $superAdminUser->setEmergencyContactName('N/A');
         $superAdminUser->setEmergencyContactPhone('+242060000000');
-        $superAdminUser->setRoles(['ROLE_USER']);
+        $superAdminUser->setRoles(['ROLE_USER', 'ROLE_ADMIN']);
 
         $hashedPassword = $this->passwordHasher->hashPassword($superAdminUser, 'Admin123!');
         $superAdminUser->setPassword($hashedPassword);
@@ -61,7 +61,7 @@ class AdminFixtures extends Fixture
         $supportAdminUser->setQuartier('Centre-ville');
         $supportAdminUser->setEmergencyContactName('N/A');
         $supportAdminUser->setEmergencyContactPhone('+242060000000');
-        $supportAdminUser->setRoles(['ROLE_USER']);
+        $supportAdminUser->setRoles(['ROLE_USER', 'ROLE_ADMIN']);
 
         $hashedSupportPassword = $this->passwordHasher->hashPassword($supportAdminUser, 'Support123!');
         $supportAdminUser->setPassword($hashedSupportPassword);
@@ -87,7 +87,7 @@ class AdminFixtures extends Fixture
         $suspendedUser->setQuartier('Centre-ville');
         $suspendedUser->setEmergencyContactName('N/A');
         $suspendedUser->setEmergencyContactPhone('+242060000000');
-        $suspendedUser->setRoles(['ROLE_USER']);
+        $suspendedUser->setRoles(['ROLE_USER','ROLE_ADMIN']);
 
         $hashedSuspendedPassword = $this->passwordHasher->hashPassword($suspendedUser, 'Suspended123!');
         $suspendedUser->setPassword($hashedSuspendedPassword);

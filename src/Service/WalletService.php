@@ -148,12 +148,22 @@ class WalletService
      * l'agence (la commission plateforme, elle, n'a jamais transité par le
      * portefeuille de l'agence et n'a donc rien à "rendre").
      *
-     * Si les fonds correspondants ont déjà été retirés (available insuffisant),
-     * le débit est plafonné à ce qui reste disponible et le manque à gagner
-     * est noté dans la description — à traiter manuellement par l'admin
-     * (ex : compensation sur le prochain versement).
+     * Si les fonds correspondants ont déjà été retirés (available insuffisant) :
+     *   - mode standard ($allowNegative = false) : le débit est PLAFONNÉ à ce
+     *     qui reste disponible et le manque à gagner est noté dans la
+     *     description — à traiter manuellement par l'admin.
+     *   - mode forcé ($allowNegative = true) : le débit est appliqué en
+     *     intégralité, quitte à faire passer le solde disponible en négatif,
+     *     pour refléter fidèlement la dette réelle de l'agence.
+     *
+     * SOURCE UNIQUE DE VÉRITÉ : c'est la SEULE méthode qui doit débiter un
+     * portefeuille suite à un remboursement, qu'il soit initié depuis
+     * PaymentController::refund() ou depuis AdminRefundController. Elle est
+     * idempotente PAR RÉSERVATION (peu importe le "mode") : un second appel,
+     * standard ou forcé, retrouve la transaction SOURCE_REFUND déjà créée et
+     * ne débite jamais deux fois.
      */
-    public function debitForRefund(Reservation $reservation, ?string $reason = null): ?WalletTransaction
+    public function debitForRefund(Reservation $reservation, ?string $reason = null, bool $allowNegative = false): ?WalletTransaction
     {
         $trip = $reservation->getTrip();
         $agency = $trip?->getAgency();
@@ -172,6 +182,11 @@ class WalletService
             return null;
         }
 
+        // 👈 Garde d'idempotence GLOBALE : peu importe quel contrôleur appelle
+        // cette méthode (PaymentController::refund ou AdminRefundController),
+        // une réservation ne peut jamais être débitée deux fois. C'est ce
+        // qui protège contre le double remboursement entre les deux surfaces
+        // d'administration.
         $existingRefund = $this->em->getRepository(WalletTransaction::class)->findOneBy([
             'reservation' => $reservation,
             'type' => WalletTransaction::TYPE_DEBIT,
@@ -184,10 +199,18 @@ class WalletService
         $wallet = $this->getOrCreateWallet($agency);
 
         $netAmount = round((float) $creditTx->getAmount(), 2);
-
         $available = round((float) $wallet->getAvailableBalance(), 2);
-        $debited = min($available, $netAmount);
-        $shortfall = round($netAmount - $debited, 2);
+
+        if ($allowNegative) {
+            // Remboursement forcé : on débite le montant complet, même si le
+            // solde disponible devient négatif — ce négatif reflète une dette
+            // réelle de l'agence envers la plateforme, à recouvrer.
+            $debited = $netAmount;
+            $shortfall = 0.0;
+        } else {
+            $debited = min($available, $netAmount);
+            $shortfall = round($netAmount - $debited, 2);
+        }
 
         $newAvailable = round($available - $debited, 2);
         $wallet->setAvailableBalance((string) $newAvailable);
@@ -196,6 +219,8 @@ class WalletService
         $tx = new WalletTransaction();
         $tx->setWallet($wallet);
         $tx->setType(WalletTransaction::TYPE_DEBIT);
+        // 👈 Toujours SOURCE_REFUND (même en mode forcé) : c'est ce tag,
+        // et non le "mode", qui sert de clé d'idempotence ci-dessus.
         $tx->setSource(WalletTransaction::SOURCE_REFUND);
         $tx->setAmount((string) $debited);
         $tx->setBalanceAfter((string) $newAvailable);
@@ -204,6 +229,9 @@ class WalletService
         $description = sprintf('Remboursement réservation #%d (%s)', $reservation->getId(), $reason ?? 'non précisé');
         if ($shortfall > 0) {
             $description .= sprintf(' — manque à gagner %.2f XAF (fonds déjà retirés par l\'agence)', $shortfall);
+        }
+        if ($allowNegative && $newAvailable < 0) {
+            $description .= sprintf(' — REMBOURSEMENT FORCÉ, solde agence désormais négatif (%.2f XAF)', $newAvailable);
         }
         $tx->setDescription($description);
 
@@ -230,6 +258,23 @@ class WalletService
 
         if ($amount > $available) {
             throw new \RuntimeException('Solde disponible insuffisant pour cette demande de retrait.');
+        }
+
+        // 👈 NOUVEAU : le solde bloqué (remboursements clients en attente +
+        // billets non validés) n'était vérifié qu'à l'approbation admin,
+        // jamais à la création. Une agence pouvait donc réserver la totalité
+        // de son solde disponible alors qu'elle devait encore de l'argent à
+        // des clients. On bloque désormais dès la création de la demande ;
+        // l'admin garde la possibilité de passer outre via forcePay au
+        // moment de l'approbation si la situation le justifie.
+        $blocked = $this->calculateBlockedBalance($wallet);
+        if (($available - $amount) < $blocked) {
+            throw new \RuntimeException(sprintf(
+                'Solde insuffisant pour couvrir les remboursements clients en attente et les billets non validés. Disponible: %.2f XAF, bloqué: %.2f XAF, demandé: %.2f XAF.',
+                $available,
+                $blocked,
+                $amount
+            ));
         }
 
         $newAvailable = round($available - $amount, 2);
@@ -342,37 +387,48 @@ class WalletService
         }
 
         $wallet = $this->getOrCreateWallet($agency);
-        $withdrawalAmount = (float) $withdrawal->getAmount();
-        
-        $currentBalance = (float) $wallet->getAvailableBalance();
-        $reservedBalance = (float) $wallet->getReservedBalance();
-        $totalAvailable = $currentBalance + $reservedBalance;
-        
-        $balanceAfterWithdrawal = $totalAvailable - $withdrawalAmount;
+        $withdrawalAmount = round((float) $withdrawal->getAmount(), 2);
+
+        $currentBalance = round((float) $wallet->getAvailableBalance(), 2);
+        $reservedBalance = round((float) $wallet->getReservedBalance(), 2);
+        $totalAvailable = round($currentBalance + $reservedBalance, 2);
+
+        $balanceAfterWithdrawal = round($totalAvailable - $withdrawalAmount, 2);
+
+        // 👈 UNIFIÉ avec calculateBlockedBalance() : avant, ce contrôle ne
+        // comptait que les remboursements clients en attente et ignorait la
+        // valeur des billets non validés/embarqués, alors que ce second
+        // risque EST comptabilisé dans le "blocked" affiché au dashboard
+        // (AdminWalletController). Les deux définitions de "solde sûr à
+        // retirer" divergeaient ; il n'y en a plus qu'une désormais.
+        $totalBlocked = $this->calculateBlockedBalance($wallet);
+        // Conservé pour rétro-compatibilité de l'API (affichage détaillé)
         $totalPendingRefunds = $this->refundRequestRepository->getPendingRefundsAmountForAgency($agency);
-        
-        $solvent = $balanceAfterWithdrawal >= $totalPendingRefunds;
-        
+
+        $solvent = $balanceAfterWithdrawal >= $totalBlocked;
+
         if ($solvent) {
             return [
                 'solvent' => true,
-                'message' => 'Agency can safely cover pending refunds after this withdrawal.',
+                'message' => 'Agency can safely cover pending refunds and unvalidated tickets after this withdrawal.',
                 'remainingBalance' => $balanceAfterWithdrawal,
                 'totalPendingRefunds' => $totalPendingRefunds,
+                'totalBlocked' => $totalBlocked,
             ];
         } else {
-            $shortfall = $totalPendingRefunds - $balanceAfterWithdrawal;
+            $shortfall = round($totalBlocked - $balanceAfterWithdrawal, 2);
             return [
                 'solvent' => false,
                 'message' => sprintf(
-                    'Financial risk: After withdrawal of %.2f, agency will have %.2f but owes %.2f in customer refunds. Shortfall: %.2f',
+                    'Financial risk: After withdrawal of %.2f, agency will have %.2f but owes %.2f (pending refunds + unvalidated tickets). Shortfall: %.2f',
                     $withdrawalAmount,
                     $balanceAfterWithdrawal,
-                    $totalPendingRefunds,
+                    $totalBlocked,
                     $shortfall
                 ),
                 'remainingBalance' => $balanceAfterWithdrawal,
                 'totalPendingRefunds' => $totalPendingRefunds,
+                'totalBlocked' => $totalBlocked,
             ];
         }
     }

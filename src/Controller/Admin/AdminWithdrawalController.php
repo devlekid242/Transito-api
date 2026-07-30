@@ -9,22 +9,28 @@ use App\Entity\WithdrawalRequest;
 use App\Repository\RefundRequestRepository;
 use App\Service\WalletService;
 use App\Repository\WithdrawalRequestRepository;
+use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
 
 /**
  * Traitement des demandes de retrait par le back-office SuperAdmin.
  *
- * TODO sécurité : brancher un contrôle de rôle (#[IsGranted('ROLE_SUPER_ADMIN')]
- * ou équivalent) avant mise en production — ce fichier ne fait volontairement
- * aucune hypothèse sur votre système d'authentification admin actuel.
+ * 👈 CORRIGÉ (audit sécurité) : le contrôle de rôle manquant est désormais
+ * branché via #[IsGranted('ROLE_ADMIN')]. Auparavant, seule la connexion
+ * (getUser() instanceof User) était vérifiée dans chaque action, ce qui
+ * permettait à n'importe quel utilisateur authentifié d'approuver/rejeter
+ * des retraits. Adapter le rôle exact à votre hiérarchie réelle si besoin
+ * (ex : 'ROLE_SUPER_ADMIN').
  */
 #[Route('/api/admin/withdrawals')]
+#[IsGranted('ROLE_ADMIN')]
 class AdminWithdrawalController extends AbstractController
 {
     public function __construct(
@@ -185,6 +191,47 @@ class AdminWithdrawalController extends AbstractController
             return new JsonResponse(['message' => 'Cette demande a déjà été traitée.'], Response::HTTP_CONFLICT);
         }
 
+        // 👈 NOUVEAU : verrou pessimiste + re-vérification du statut sous
+        // transaction. AVANT, deux appels concurrents à approve() (double
+        // clic, retry réseau) pouvaient tous les deux passer le contrôle de
+        // statut ci-dessus avant que l'un des deux ne flush, et déclencher
+        // WalletService::completeWithdrawal() deux fois pour la même demande
+        // (double décrément de reservedBalance / double incrément de
+        // totalWithdrawn). Le verrou PESSIMISTIC_WRITE sérialise les deux
+        // appels ; le second, une fois le verrou obtenu, retrouve un statut
+        // déjà "approved" et s'arrête proprement.
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+
+        try {
+            $lockedWithdrawal = $this->em->getRepository(WithdrawalRequest::class)
+                ->find($id, LockMode::PESSIMISTIC_WRITE);
+
+            if (!$lockedWithdrawal || $lockedWithdrawal->getStatus() !== 'pending') {
+                $connection->rollBack();
+                return new JsonResponse(['message' => 'Cette demande a déjà été traitée.'], Response::HTTP_CONFLICT);
+            }
+            $withdrawal = $lockedWithdrawal;
+
+            $response = $this->doApprove($withdrawal, $request);
+
+            $this->em->flush();
+            $connection->commit();
+
+            return $response;
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Logique métier de l'approbation, exécutée sous verrou pessimiste par
+     * approve() ci-dessus. Extraite dans sa propre méthode pour ne pas
+     * flusher au milieu de la transaction verrouillée.
+     */
+    private function doApprove(WithdrawalRequest $withdrawal, Request $request): JsonResponse
+    {
         $data = json_decode($request->getContent(), true) ?? [];
         $forcePay = $data['forcePay'] ?? false;
         $adminNote = $data['note'] ?? null;
@@ -221,9 +268,18 @@ class AdminWithdrawalController extends AbstractController
                     ], Response::HTTP_CONFLICT);
                 }
             } catch (\Exception $e) {
-                // If solvency check fails, allow the withdrawal to proceed
-                // This ensures backward compatibility
+                // 👈 CORRIGÉ (audit sécurité financière) : AVANT, une exception
+                // ici (bug, DB indisponible, dépendance manquante...) laissait
+                // le retrait passer SANS AUCUN contrôle de solvabilité — un
+                // contrôle de sécurité financière qui "fail open" sur erreur
+                // est une faille en soi. On bloque désormais par défaut et on
+                // laisse l'admin décider consciemment via forcePay.
                 error_log('Solvency check failed: ' . $e->getMessage());
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'Impossible de vérifier la solvabilité de l\'agence pour le moment. Réessayez, ou utilisez le paiement forcé en connaissance de cause.',
+                    'requiresForcePay' => true,
+                ], Response::HTTP_INTERNAL_SERVER_ERROR);
             }
         }
 
@@ -245,7 +301,6 @@ class AdminWithdrawalController extends AbstractController
         }
 
         $this->em->persist($withdrawal);
-        $this->em->flush();
 
         return new JsonResponse([
             'success' => true,
@@ -278,23 +333,44 @@ class AdminWithdrawalController extends AbstractController
             return new JsonResponse(['message' => 'Cette demande a déjà été traitée.'], Response::HTTP_CONFLICT);
         }
 
-        $data = json_decode($request->getContent(), true) ?? [];
-
-        // Get the current admin user for traceability
         $currentAdmin = $this->getUser();
         if (!$currentAdmin instanceof User) {
             return new JsonResponse(['message' => 'Authentification requise pour traiter cette demande.'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $this->walletService->releaseWithdrawal($withdrawal);
+        // 👈 NOUVEAU : même correctif de course critique qu'approve() — verrou
+        // pessimiste + re-vérification du statut sous transaction, pour
+        // empêcher qu'un reject() concurrent à un autre reject()/approve()
+        // ne libère les fonds réservés deux fois.
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
 
-        $withdrawal->setStatus('rejected');
-        $withdrawal->setProcessedAt(new \DateTime());
-        $withdrawal->setProcessedByAdmin($currentAdmin);
-        $withdrawal->setAdminNote($data['note'] ?? 'Rejeté par l\'administrateur.');
+        try {
+            $lockedWithdrawal = $this->em->getRepository(WithdrawalRequest::class)
+                ->find($id, LockMode::PESSIMISTIC_WRITE);
 
-        $this->em->persist($withdrawal);
-        $this->em->flush();
+            if (!$lockedWithdrawal || $lockedWithdrawal->getStatus() !== 'pending') {
+                $connection->rollBack();
+                return new JsonResponse(['message' => 'Cette demande a déjà été traitée.'], Response::HTTP_CONFLICT);
+            }
+            $withdrawal = $lockedWithdrawal;
+
+            $data = json_decode($request->getContent(), true) ?? [];
+
+            $this->walletService->releaseWithdrawal($withdrawal);
+
+            $withdrawal->setStatus('rejected');
+            $withdrawal->setProcessedAt(new \DateTime());
+            $withdrawal->setProcessedByAdmin($currentAdmin);
+            $withdrawal->setAdminNote($data['note'] ?? 'Rejeté par l\'administrateur.');
+
+            $this->em->persist($withdrawal);
+            $this->em->flush();
+            $connection->commit();
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
+        }
 
         return new JsonResponse([
             'success' => true,

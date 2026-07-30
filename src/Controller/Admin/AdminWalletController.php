@@ -19,12 +19,19 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
  * Admin Wallet Management Controller
  * Handles wallet listing, detail viewing, manual adjustments, and freeze/unfreeze operations.
+ *
+ * 👈 CORRIGÉ (audit sécurité) : #[IsGranted('ROLE_ADMIN')] ajouté — ce
+ * contrôleur permet de créditer/débiter/geler manuellement N'IMPORTE QUEL
+ * portefeuille d'agence, ce qui en fait la surface la plus sensible de
+ * l'API. Il n'y avait auparavant aucune vérification de rôle.
  */
 #[Route('/api/admin/wallets')]
+#[IsGranted('ROLE_ADMIN')]
 class AdminWalletController extends AbstractController
 {
     public function __construct(

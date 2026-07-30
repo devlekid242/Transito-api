@@ -368,6 +368,7 @@ class UserController extends AbstractController
             'emergencyContactName' => $user->getEmergencyContactName(),
             'emergencyContactPhone' => $user->getEmergencyContactPhone(),
             'profilePhotoUrl' => $user->getProfilePhotoUrl(),
+            'lastLogin' => $user->getLastLoginAt()?->format(\DateTimeInterface::ATOM),
             'createdAt' => $user->getCreatedAt()?->format(\DateTimeInterface::ATOM),
             'updatedAt' => $user->getCreatedAt()?->format(\DateTimeInterface::ATOM),
         ];

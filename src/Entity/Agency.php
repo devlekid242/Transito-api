@@ -10,6 +10,8 @@ use ApiPlatform\Metadata\Put;
 use ApiPlatform\Metadata\Delete;
 use App\Repository\AgencyRepository;
 use App\Entity\AgencyDocument;
+use App\Entity\Trip;
+use App\Entity\Wallet;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
@@ -122,6 +124,10 @@ class Agency
     #[Groups(['agency:read'])]
     private ?Wallet $wallet = null;
 
+    #[ORM\OneToMany(targetEntity: Trip::class, mappedBy: 'agency')]
+    #[Groups(['agency:read'])]
+    private Collection $trips;
+
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['agency:read'])]
     private ?\DateTimeInterface $createdAt = null;
@@ -130,6 +136,7 @@ class Agency
     {
         $this->createdAt = new \DateTime();
         $this->documents = new ArrayCollection();
+        $this->trips = new ArrayCollection();
     }
 
     // --- GETTERS ET SETTERS ---
@@ -323,5 +330,34 @@ class Agency
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    /**
+     * @return Collection<int, Trip>
+     */
+    public function getTrips(): Collection
+    {
+        return $this->trips;
+    }
+
+    public function addTrip(Trip $trip): static
+    {
+        if (!$this->trips->contains($trip)) {
+            $this->trips->add($trip);
+            $trip->setAgency($this);
+        }
+
+        return $this;
+    }
+
+    public function removeTrip(Trip $trip): static
+    {
+        if ($this->trips->removeElement($trip)) {
+            if ($trip->getAgency() === $this) {
+                $trip->setAgency(null);
+            }
+        }
+
+        return $this;
     }
 }

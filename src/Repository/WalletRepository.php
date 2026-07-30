@@ -29,6 +29,19 @@ class WalletRepository extends ServiceEntityRepository
         return $result ?? '0.00';
     }
 
+    /** 
+     * Get total balance across all wallets (available + reserved).
+     */
+    public function getTotalBalance(): string
+    {
+        $result = $this->createQueryBuilder('w')
+            ->select('SUM(w.reservedBalance + w.availableBalance) as total')
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return $result ?? '0.00';
+    }
+
     /**
      * Get total available balance across all agency wallets.
      */
