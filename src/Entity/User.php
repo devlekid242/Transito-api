@@ -150,6 +150,9 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[ORM\OneToOne(mappedBy: 'user', targetEntity: Admin::class, cascade: ['persist'])]
     private ?Admin $admin = null;
 
+    #[ORM\OneToOne(mappedBy: 'user', targetEntity: Agent::class, cascade: ['persist'])]
+    private ?Agent $agent = null;
+
     public function __construct()
     {
         $this->createdAt = new \DateTime();
@@ -258,6 +261,17 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function setAdmin(?Admin $admin): static
     {
         $this->admin = $admin;
+        return $this;
+    }
+
+    public function getAgent(): ?Agent
+    {
+        return $this->agent;
+    }
+
+    public function setAgent(?Agent $agent): static
+    {
+        $this->agent = $agent;
         return $this;
     }
 

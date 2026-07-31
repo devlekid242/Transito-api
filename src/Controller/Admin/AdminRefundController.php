@@ -169,7 +169,7 @@ class AdminRefundController extends AbstractController
     /**
      * Get a single refund request detail
      */
-    #[Route('/{id}', name: 'api_admin_refunds_detail', methods: ['GET'])]
+    #[Route('/{id}', name: 'api_admin_refunds_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function detail(int $id): JsonResponse
     {
         $refundRequest = $this->em->getRepository(RefundRequest::class)->find($id);

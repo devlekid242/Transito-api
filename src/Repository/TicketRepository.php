@@ -41,6 +41,27 @@ class TicketRepository extends ServiceEntityRepository
     }
 
     /**
+     * Compte les tickets en attente (donc "occupant" une place) pour UN trajet donné.
+     *
+     * 👈 CORRECTIF : Ticket n'a pas de champ `trip` (seulement `reservation`),
+     * donc `findBy(['trip' => ...])` ou `count(['trip' => ...])` levaient une
+     * QueryException ("unrecognized field"). On passe par la vraie relation
+     * Ticket -> Reservation -> Trip.
+     */
+    public function countPendingForTrip(Trip $trip): int
+    {
+        return (int) ($this->createQueryBuilder('t')
+            ->select('COUNT(t.id)')
+            ->join('t.reservation', 'r')
+            ->where('r.trip = :trip')
+            ->andWhere('t.status = :status')
+            ->setParameter('trip', $trip)
+            ->setParameter('status', 'en_attente')
+            ->getQuery()
+            ->getSingleScalarResult() ?? 0);
+    }
+
+    /**
      * Compte les tickets en attente (non validés) pour une agence
      */
     public function countPendingByTrip(Agency $agency, \DateTime $start, \DateTime $end): int

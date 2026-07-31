@@ -152,4 +152,144 @@ class TripRepository extends ServiceEntityRepository
             ->getQuery()
             ->getResult();
     }
+
+    /**
+     * Find trip with reservations and tickets (for manifest).
+     */
+    public function findWithManifest(int $tripId): ?Trip
+    {
+        return $this->createQueryBuilder('t')
+            ->leftJoin('t.reservations', 'r')
+            ->leftJoin('r.tickets', 'ticket')
+            ->leftJoin('t.bus', 'b')
+            ->leftJoin('t.agency', 'a')
+            ->where('t.id = :tripId')
+            ->setParameter('tripId', $tripId)
+            ->getQuery()
+            ->getOneOrNullResult();
+    }
+
+    /**
+     * Find trips with pagination and optional filters for admin listing.
+     */
+    public function findTripsForAdmin(
+        int $page = 1,
+        int $limit = 10,
+        ?string $status = null,
+        ?int $agencyId = null,
+        ?string $startDate = null,
+        ?string $endDate = null,
+        ?string $search = null
+    ): array {
+        $offset = ($page - 1) * $limit;
+        
+        $qb = $this->createQueryBuilder('t')
+            ->leftJoin('t.agency', 'a')
+            ->leftJoin('t.bus', 'b')
+            ->leftJoin('t.reservations', 'r')
+            ->select('t', 'a', 'b')
+            ->orderBy('t.departureTime', 'DESC')
+            ->setFirstResult($offset)
+            ->setMaxResults($limit);
+
+        // Apply filters
+        if ($status && $status !== 'ALL') {
+            $statusMap = [
+                'SCHEDULED' => 'planifie',
+                'IN_PROGRESS' => ['embarquement', 'en_route'],
+                'COMPLETED' => 'termine',
+                'CANCELLED' => 'annule',
+                'DELAYED' => 'annule'
+            ];
+            
+            if (isset($statusMap[$status])) {
+                if (is_array($statusMap[$status])) {
+                    $qb->andWhere('t.status IN (:status)')->setParameter('status', $statusMap[$status]);
+                } else {
+                    $qb->andWhere('t.status = :status')->setParameter('status', $statusMap[$status]);
+                }
+            }
+        }
+
+        if ($agencyId) {
+            $qb->andWhere('t.agency = :agencyId')->setParameter('agencyId', $agencyId);
+        }
+
+        if ($startDate) {
+            $qb->andWhere('t.departureTime >= :startDate')->setParameter('startDate', $startDate);
+        }
+
+        if ($endDate) {
+            $qb->andWhere('t.departureTime <= :endDate')->setParameter('endDate', $endDate);
+        }
+
+        if ($search) {
+            $qb->andWhere('(
+                t.departureCity LIKE :search OR
+                t.arrivalCity LIKE :search OR
+                CONCAT(t.departureCity, \' → \', t.arrivalCity) LIKE :search OR
+                a.name LIKE :search OR
+                t.driverName LIKE :search OR
+                b.registrationNumber LIKE :search
+            )')->setParameter('search', '%' . $search . '%');
+        }
+
+        return $qb->getQuery()->getResult();
+    }
+
+    /**
+     * Count trips matching filter criteria.
+     */
+    public function countTripsForAdmin(
+        ?string $status = null,
+        ?int $agencyId = null,
+        ?string $startDate = null,
+        ?string $endDate = null,
+        ?string $search = null
+    ): int {
+        $qb = $this->createQueryBuilder('t')
+            ->leftJoin('t.agency', 'a')
+            ->leftJoin('t.bus', 'b')
+            ->select('COUNT(t.id)');
+
+        if ($status && $status !== 'ALL') {
+            $statusMap = [
+                'SCHEDULED' => 'planifie',
+                'IN_PROGRESS' => ['embarquement', 'en_route'],
+                'COMPLETED' => 'termine',
+                'CANCELLED' => 'annule',
+                'DELAYED' => 'annule'
+            ];
+            
+            if (isset($statusMap[$status])) {
+                if (is_array($statusMap[$status])) {
+                    $qb->andWhere('t.status IN (:status)')->setParameter('status', $statusMap[$status]);
+                } else {
+                    $qb->andWhere('t.status = :status')->setParameter('status', $statusMap[$status]);
+                }
+            }
+        }
+
+        if ($agencyId) {
+            $qb->andWhere('t.agency = :agencyId')->setParameter('agencyId', $agencyId);
+        }
+
+        if ($startDate) {
+            $qb->andWhere('t.departureTime >= :startDate')->setParameter('startDate', $startDate);
+        }
+
+        if ($endDate) {
+            $qb->andWhere('t.departureTime <= :endDate')->setParameter('endDate', $endDate);
+        }
+
+        if ($search) {
+            $qb->andWhere('(
+                t.departureCity LIKE :search OR
+                t.arrivalCity LIKE :search OR
+                a.name LIKE :search
+            )')->setParameter('search', '%' . $search . '%');
+        }
+
+        return (int) $qb->getQuery()->getSingleScalarResult();
+    }
 }

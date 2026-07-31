@@ -134,7 +134,7 @@ class AdminWithdrawalController extends AbstractController
     /**
      * Récupère une seule demande de retrait par ID.
      */
-    #[Route('/{id}', name: 'api_admin_withdrawals_detail', methods: ['GET'])]
+    #[Route('/{id}', name: 'api_admin_withdrawals_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function detail(int $id): JsonResponse
     {
         $withdrawal = $this->em->getRepository(WithdrawalRequest::class)->find($id);

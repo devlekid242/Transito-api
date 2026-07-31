@@ -71,9 +71,14 @@ class PaymentLog
     private ?int $id = null;
 
     #[ORM\ManyToOne(targetEntity: Reservation::class)]
-    #[ORM\JoinColumn(name: 'reservation_id', referencedColumnName: 'id', nullable: false, onDelete: 'CASCADE')]
+    #[ORM\JoinColumn(name: 'reservation_id', referencedColumnName: 'id', nullable: true, onDelete: 'CASCADE')]
     #[Groups(['payment:read'])]
     private ?Reservation $reservation = null;
+
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'user_id', referencedColumnName: 'id', nullable: true, onDelete: 'CASCADE')]
+    #[Groups(['payment:read'])]
+    private ?User $user = null;
 
     #[ORM\Column(length: 50)]
     #[Groups(['payment:read'])]
@@ -132,6 +137,17 @@ class PaymentLog
     public function setReservation(?Reservation $reservation): static
     {
         $this->reservation = $reservation;
+        return $this;
+    }
+
+    public function getUser(): ?User
+    {
+        return $this->user;
+    }
+
+    public function setUser(?User $user): static
+    {
+        $this->user = $user;
         return $this;
     }
 

@@ -149,7 +149,7 @@ class AdminWalletController extends AbstractController
     /**
      * Get a single wallet with detailed information
      */
-    #[Route('/{id}', name: 'api_admin_wallets_detail', methods: ['GET'])]
+    #[Route('/{id}', name: 'api_admin_wallets_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function detail(int $id): JsonResponse
     {
         $wallet = $this->em->getRepository(Wallet::class)->find($id);

@@ -278,4 +278,19 @@ class ReservationRepository extends ServiceEntityRepository
 
         return round(($cancelled / $total) * 100, 2);
     }
+
+    /**
+     * Count user cancellations (reservations with cancelled or no_show status).
+     */
+    public function countUserCancellations($user): int
+    {
+        return (int) $this->createQueryBuilder('r')
+            ->select('COUNT(r.id)')
+            ->where('r.user = :user')
+            ->andWhere('r.paymentStatus IN (:statuses)')
+            ->setParameter('user', $user)
+            ->setParameter('statuses', ['annule', 'echoue', 'annulée', 'échouée', 'cancelled', 'failed', 'no_show'])
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
 }

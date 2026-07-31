@@ -11,6 +11,8 @@ use ApiPlatform\Metadata\Delete;
 use App\Controller\TripController;
 use App\Repository\TripRepository;
 use Doctrine\DBAL\Types\Types;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
 use Symfony\Component\Validator\Constraints as Assert;
@@ -172,9 +174,20 @@ class Trip
     #[Groups(['trip:read'])]
     private ?\DateTimeInterface $createdAt = null;
 
+    /**
+     * 👈 CORRECTIF : cette relation inverse manquait totalement. Reservation
+     * déclare bien un `#[ORM\ManyToOne(targetEntity: Trip::class)]`, mais sans
+     * relation inverse déclarée côté Trip, `t.reservations` n'existait pas en
+     * DQL — ce qui faisait planter (QueryException) la liste des trajets et
+     * les KPIs (AdminTripController::list()/kpis()), qui en dépendaient.
+     */
+    #[ORM\OneToMany(targetEntity: Reservation::class, mappedBy: 'trip')]
+    private Collection $reservations;
+
     public function __construct()
     {
         $this->createdAt = new \DateTime();
+        $this->reservations = new ArrayCollection();
     }
 
     public function getId(): ?int
@@ -224,6 +237,17 @@ class Trip
     {
         $this->arrivalCity = $arrivalCity;
         return $this;
+    }
+
+    /**
+     * Convenience accessor combining departure and arrival cities,
+     * used for display purposes (e.g. user statistics "favorite route").
+     */
+    public function getRoute(): string
+    {
+        $departure = $this->departureCity ?? 'N/A';
+        $arrival = $this->arrivalCity ?? 'N/A';
+        return $departure . ' → ' . $arrival;
     }
 
     public function getBoardingPoints(): array
@@ -372,5 +396,13 @@ class Trip
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    /**
+     * @return Collection<int, Reservation>
+     */
+    public function getReservations(): Collection
+    {
+        return $this->reservations;
     }
 }
