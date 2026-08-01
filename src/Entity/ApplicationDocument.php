@@ -13,18 +13,19 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: ApplicationDocumentRepository::class)]
 #[ORM\Table(name: '`application_documents`')]
+// NOTE : 'collectionOperations' / 'itemOperations' sont la syntaxe API Platform 2.x,
+// supprimée en 3.x. Le reste du projet (voir Agency.php) utilise déjà la syntaxe
+// moderne 'operations: [...]' — on aligne cette entité pour rester cohérent.
 #[ApiResource(
-    collectionOperations: [
+    operations: [
         new GetCollection(
             name: 'api_application_documents_list',
             security: "is_granted('ROLE_ADMIN')"
-        )
-    ],
-    itemOperations: [
+        ),
         new Get(
             name: 'api_application_documents_detail',
             security: "is_granted('ROLE_ADMIN')"
-        )
+        ),
     ],
     normalizationContext: ['groups' => ['application_document:read']]
 )]

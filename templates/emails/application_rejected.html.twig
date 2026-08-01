@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Candidature - Réponse</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #fff; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .footer { background: #f8f9fa; padding: 20px; text-align: center; margin-top: 20px; border-radius: 10px; }
+        .btn { display: inline-block; background: #6b7280; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 15px 0; }
+        .btn:hover { background: #4b5563; }
+        .highlight { background: #fef2f2; padding: 15px; border-left: 4px solid #ef4444; margin: 15px 0; }
+        .info-box { background: #f8fafc; padding: 15px; border-radius: 8px; margin: 15px 0; }
+        .reason-box { background: #fef2f2; padding: 20px; border-radius: 8px; margin: 15px 0; border: 1px solid #fecaca; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1 style="margin: 0; font-size: 28px;">❌ Candidature de partenariat</h1>
+            <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Réponse à votre demande</p>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+            <p>Bonjour {{ application.legalRepresentative }},</p>
+
+            <div class="highlight">
+                <h2 style="margin: 0 0 10px 0; color: #dc2626;">Nous regrettons de vous informer que votre candidature n'a pas été retenue.</h2>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">📋 Détails de votre candidature</h3>
+                <p style="margin: 5px 0;"><strong>Référence:</strong> {{ application.ref }}</p>
+                <p style="margin: 5px 0;"><strong>Nom de l'agence:</strong> {{ application.agencyName }}</p>
+                <p style="margin: 5px 0;"><strong>Soumise le:</strong> {{ application.submittedAt }}</p>
+            </div>
+
+            <div class="reason-box">
+                <h3 style="margin: 0 0 10px 0; color: #dc2626;">📝 Motif du rejet</h3>
+                <p style="margin: 10px 0; line-height: 1.8;">{{ rejectionReason }}</p>
+                {% if reviewerNotes %}
+                <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #fecaca;">
+                    <h4 style="margin: 0 0 8px 0; color: #7f1d1d; font-size: 14px;">Commentaires supplémentaires:</h4>
+                    <p style="margin: 5px 0; font-style: italic;">{{ reviewerNotes }}</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">💡 Que faire maintenant ?</h3>
+                <p style="margin: 10px 0;">Votre candidature peut être resoumise après avoir apporté les corrections nécessaires.</p>
+                <p style="margin: 10px 0;">Nous vous invitons à :</p>
+                <ul style="margin: 10px 0 0 20px; padding: 0;">
+                    <li style="margin-bottom: 8px;">Corriger les points mentionnés ci-dessus</li>
+                    <li style="margin-bottom: 8px;">Compléter les documents manquants si nécessaire</li>
+                    <li style="margin-bottom: 8px;">Resoumettre votre candidature via notre plateforme</li>
+                </ul>
+            </div>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="{{ enrollmentUrl }}" class="btn">Resoumettre une candidature</a>
+            </div>
+
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">🤝 Nous restons à votre disposition</h3>
+                <p style="margin: 10px 0;">Nous comprenons que cette réponse peut être décevante. N'hésitez pas à nous contacter pour discuter de votre candidature ou obtenir des conseils pour une prochaine soumission.</p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p style="margin: 0; color: #6b7280;">
+                Cordialement,<br>
+                <strong>L'équipe Tansico Partenariats</strong>
+            </p>
+            <p style="margin: 10px 0 0 0; font-size: 12px; color: #9ca3af;">
+                📧 Email: {{ supportEmail }} | 📞 Téléphone: {{ supportPhone }}
+            </p>
+        </div>
+    </div>
+</body>
+</html>

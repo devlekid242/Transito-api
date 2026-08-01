@@ -1,0 +1,41 @@
+Nouvelle candidature reçue
+================================
+
+Bonjour administrateur,
+
+Une nouvelle candidature de partenariat a été soumise et nécessite votre attention.
+
+DÉTAILS DE LA CANDIDATURE
+--------------------------
+Référence: {{ application.ref }}
+Nom de l'agence: {{ application.agencyName }}
+Représentant légal: {{ application.legalRepresentative }}
+Email: {{ application.email }}
+Téléphone: {{ application.phone }}
+Ville: {{ application.city }}
+Soumise le: {{ submittedAt }}
+
+INFORMATIONS SUPPLÉMENTAIRES
+----------------------------
+Taille de la flotte: {{ application.fleetSize }} bus
+Routes prévues: {{ application.routesPlanned|join(', ') }}
+Nombre de documents: {{ application.documents|length }}
+
+DESCRIPTION
+-----------
+{{ application.description }}
+
+ACTIONS RECOMMANDÉES
+--------------------
+1. Vérifier que tous les documents requis sont présents
+2. Valider les informations de l'agence
+3. Contacter l'agence si des informations manquent
+4. Prendre une décision (Approuver ou Rejeter) sous {{ estimatedProcessingTime }}
+
+Voir la candidature: {{ adminDashboardUrl }}
+
+Cette candidature attend votre revue. Merci de la traiter dans les meilleurs délais.
+
+---
+Système de gestion Tansico
+Notification automatique - Veuillez ne pas répondre à cet email

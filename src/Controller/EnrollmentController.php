@@ -30,9 +30,7 @@ class EnrollmentController extends AbstractController
         private FileUploadService $fileUploadService,
         private ValidatorInterface $validator,
         private string $publicDir,
-    ) {
-        $this->publicDir = $_ENV['PUBLIC_DIR'] ?? __DIR__ . '/../../public';
-    }
+    ) {}
 
     /**
      * Submit a new partnership application.

@@ -3,9 +3,9 @@
 namespace App\Entity;
 
 use ApiPlatform\Metadata\ApiResource;
-use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Post;
+use ApiPlatform\Metadata\Get;
 use App\Repository\ApplicationRepository;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
@@ -16,42 +16,22 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: ApplicationRepository::class)]
 #[ORM\Table(name: '`partnership_applications`')]
+/*
+ * NOTE IMPORTANTE :
+ * Toute la logique métier (soumission, statut, liste, détail, approbation, rejet)
+ * est déjà implémentée dans EnrollmentController et AdminApplicationController
+ * via des routes Symfony classiques (#[Route]). Déclarer les mêmes opérations
+ * ici, dans #[ApiResource], provoquait un conflit de noms de route (les deux
+ * mécanismes définissaient des routes identiques : 'api_admin_applications_list',
+ * 'api_admin_applications_approve', etc.), et aurait de toute façon laissé
+ * API Platform tenter de gérer ces requêtes avec son fournisseur Doctrine
+ * générique — qui ne crée ni agence, ni utilisateur admin, ni email.
+ * On ne déclare donc plus d'opérations ici : l'entité reste utilisable par le
+ * Serializer (groupes application:read / application:write) mais n'expose
+ * plus de routes API Platform en doublon.
+ */
 #[ApiResource(
-    collectionOperations: [
-        new GetCollection(
-            name: 'api_admin_applications_list',
-            security: "is_granted('ROLE_ADMIN')"
-        ),
-        new Post(
-            uriTemplate: '/public/enrollment',
-            name: 'api_public_enrollment_submit',
-            security: 'is_granted("PUBLIC_ACCESS")',
-            denormalizationContext: ['groups' => ['application:write']],
-        ),
-        new GetCollection(
-            uriTemplate: '/public/enrollment/status/{reference}',
-            name: 'api_public_enrollment_status',
-            security: 'is_granted("PUBLIC_ACCESS")',
-        ),
-    ],
-    itemOperations: [
-        new Get(
-            name: 'api_admin_applications_detail',
-            security: "is_granted('ROLE_ADMIN')"
-        ),
-        new Post(
-            uriTemplate: '/admin/applications/{id}/approve',
-            name: 'api_admin_applications_approve',
-            security: "is_granted('ROLE_ADMIN')",
-            inputFormats: ['json' => ['application/merge-patch+json']]
-        ),
-        new Post(
-            uriTemplate: '/admin/applications/{id}/reject',
-            name: 'api_admin_applications_reject',
-            security: "is_granted('ROLE_ADMIN')",
-            inputFormats: ['json' => ['application/merge-patch+json']]
-        ),
-    ],
+    operations: [],
     normalizationContext: ['groups' => ['application:read']],
     denormalizationContext: ['groups' => ['application:write']]
 )]
@@ -381,7 +361,10 @@ class Application
 
     public function setAdminUser(?User $adminUser): static
     {
-        $adminUser?->setAgency($this->agency);
+        // NOTE : User n'a pas de méthode setAgency() (seule l'entité Agent en a une).
+        // Le lien Utilisateur <-> Agence passe exclusivement par Agent (voir
+        // ApplicationApprovalService::approveApplication). L'appel supprimé ici
+        // provoquait une erreur fatale à chaque approbation de candidature.
         $this->adminUser = $adminUser;
         return $this;
     }

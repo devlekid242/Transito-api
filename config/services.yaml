@@ -7,12 +7,18 @@
 # Put parameters here that don't need to change on each machine where the app is deployed
 # https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
 parameters:
+    default_email: 'noreply@tansico.com'
+    default_name: 'Tansico Partenariats'
 
 services:
     # default configuration for services in *this* file
     _defaults:
         autowire: true # Automatically injects dependencies in your services.
         autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+        bind:
+            $publicDir: '%kernel.project_dir%/public' # 👈 Ajoute cette ligne
+            $fromEmail: '%env(default:default_email:MAILER_FROM_EMAIL)%' # 👈 Ajoute ceci
+            $fromName: '%env(default:default_name:MAILER_FROM_NAME)%'
 
     # makes classes in src/ available to be used as services
     # this creates a service per class whose id is the fully-qualified class name

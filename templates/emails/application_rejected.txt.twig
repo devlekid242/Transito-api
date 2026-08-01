@@ -1,0 +1,43 @@
+Candidature de partenariat - Réponse
+========================================
+
+Bonjour {{ application.legalRepresentative }},
+
+Nous regrettons de vous informer que votre candidature de partenariat n'a pas été retenue.
+
+DÉTAILS DE VOTRE CANDIDATURE
+-----------------------------
+Référence: {{ application.ref }}
+Nom de l'agence: {{ application.agencyName }}
+Soumise le: {{ application.submittedAt }}
+
+MOTIF DU REJET
+--------------
+{{ rejectionReason }}
+
+{% if reviewerNotes %}
+COMMENTAIRES SUPPLÉMENTAIRES
+----------------------------
+{{ reviewerNotes }}
+{% endif %}
+
+QUE FAIRE MAINTENANT ?
+---------------------
+Votre candidature peut être resoumise après avoir apporté les corrections nécessaires.
+
+Nous vous invitons à :
+- Corriger les points mentionnés ci-dessus
+- Compléter les documents manquants si nécessaire
+- Resoumettre votre candidature via notre plateforme
+
+Resoumettre une candidature: {{ enrollmentUrl }}
+
+NOUS RESTONS À VOTRE DISPOSITION
+---------------------------------
+Nous comprenons que cette réponse peut être décevante. N'hésitez pas à nous contacter pour discuter de votre candidature ou obtenir des conseils pour une prochaine soumission.
+
+Cordialement,
+L'équipe Tansico Partenariats
+
+Email: {{ supportEmail }}
+Téléphone: {{ supportPhone }}

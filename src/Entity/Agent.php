@@ -45,7 +45,21 @@ class Agent
     #[Groups(['agent:read', 'agent:write'])]
     private string $status = 'active';
 
-    public function __construct() {}
+    // Taux de commission (%) que touche cet agent sur les trajets qu'il traite.
+    // Toujours 0 pour un admin_agence sur sa propre agence.
+    #[ORM\Column(name: 'commission_rate', type: Types::DECIMAL, precision: 5, scale: 2, options: ['default' => '0.00'])]
+    #[Assert\PositiveOrZero(message: "Le taux de commission doit être positif ou nul.")]
+    #[Groups(['agent:read', 'agent:write'])]
+    private string $commissionRate = '0.00';
+
+    #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
+    #[Groups(['agent:read'])]
+    private ?\DateTimeInterface $createdAt = null;
+
+    public function __construct()
+    {
+        $this->createdAt = new \DateTime();
+    }
 
     public function getUser(): ?User
     {
@@ -93,6 +107,28 @@ class Agent
     public function setStatus(string $status): static
     {
         $this->status = $status;
+        return $this;
+    }
+
+    public function getCommissionRate(): string
+    {
+        return $this->commissionRate;
+    }
+
+    public function setCommissionRate(string $commissionRate): static
+    {
+        $this->commissionRate = $commissionRate;
+        return $this;
+    }
+
+    public function getCreatedAt(): ?\DateTimeInterface
+    {
+        return $this->createdAt;
+    }
+
+    public function setCreatedAt(\DateTimeInterface $createdAt): static
+    {
+        $this->createdAt = $createdAt;
         return $this;
     }
 }

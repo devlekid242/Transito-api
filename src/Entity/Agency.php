@@ -67,6 +67,14 @@ class Agency
     #[Groups(['agency:read', 'agency:write'])]
     private ?string $address = null;
 
+    #[ORM\Column(length: 50, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $city = null;
+
+    #[ORM\Column(name: 'legal_representative', length: 100, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]
+    private ?string $legalRepresentative = null;
+
     #[ORM\Column(name: 'banner_url', length: 500, nullable: true)]
     #[Groups(['agency:read', 'agency:write'])]
     private ?string $bannerUrl = null;
@@ -111,6 +119,12 @@ class Agency
     #[ORM\Column(name: 'rating_cache', type: Types::DECIMAL, precision: 3, scale: 2, nullable: true, options: ['default' => 0.00])]
     #[Groups(['agency:read'])]
     private ?string $ratingCache = '0.00';
+
+    // Vrai si les documents légaux de l'agence ont été vérifiés par un administrateur
+    // (utilisé notamment lors de l'approbation automatique d'une candidature).
+    #[ORM\Column(name: 'is_verified', type: Types::BOOLEAN, options: ['default' => false])]
+    #[Groups(['agency:read'])]
+    private bool $isVerified = false;
 
     // Taux de commission (%) prélevé par la plateforme sur chaque paiement encaissé
     // pour le compte de cette agence. Utilisé par WalletService pour calculer le
@@ -183,6 +197,26 @@ class Agency
     public function setAddress(?string $address): static
     {
         $this->address = $address;
+        return $this;
+    }
+
+    public function getCity(): ?string
+    {
+        return $this->city;
+    }
+    public function setCity(?string $city): static
+    {
+        $this->city = $city;
+        return $this;
+    }
+
+    public function getLegalRepresentative(): ?string
+    {
+        return $this->legalRepresentative;
+    }
+    public function setLegalRepresentative(?string $legalRepresentative): static
+    {
+        $this->legalRepresentative = $legalRepresentative;
         return $this;
     }
 
@@ -305,6 +339,16 @@ class Agency
         return $this;
     }
 
+    public function isVerified(): bool
+    {
+        return $this->isVerified;
+    }
+    public function setIsVerified(bool $isVerified): static
+    {
+        $this->isVerified = $isVerified;
+        return $this;
+    }
+
     public function getCommissionRate(): string
     {
         return $this->commissionRate;
@@ -330,6 +374,12 @@ class Agency
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function setCreatedAt(\DateTimeInterface $createdAt): static
+    {
+        $this->createdAt = $createdAt;
+        return $this;
     }
 
     /**

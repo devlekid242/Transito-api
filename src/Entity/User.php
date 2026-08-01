@@ -92,8 +92,12 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     private ?string $villeResidence = null;
 
     /* NOUVEAU CHAMP : QUARTIER */
-    #[ORM\Column(name: 'quartier', length: 100)]
-    #[Assert\NotBlank(message: "Le quartier de résidence est obligatoire.")]
+    // Nullable car les comptes admin d'agence créés lors de l'approbation d'une
+    // candidature (ApplicationApprovalService) ne renseignent pas ce champ.
+    // La contrainte Assert\NotBlank ne s'applique qu'au formulaire d'inscription
+    // "utilisateur passager" (groupe user:write), pas à la création interne.
+    #[ORM\Column(name: 'quartier', length: 100, nullable: true)]
+    #[Assert\NotBlank(message: "Le quartier de résidence est obligatoire.", groups: ['registration'])]
     #[Groups(['user:write'])]
     private ?string $quartier = null;
 
@@ -131,6 +135,12 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
 
     #[ORM\Column(length: 20, options: ['default' => 'active'])]
     private string $status = 'active';
+
+    #[ORM\Column(name: 'email_verified', type: Types::BOOLEAN, options: ['default' => false])]
+    private bool $emailVerified = false;
+
+    #[ORM\Column(name: 'phone_verified', type: Types::BOOLEAN, options: ['default' => false])]
+    private bool $phoneVerified = false;
 
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     private ?\DateTimeInterface $createdAt = null;
@@ -374,6 +384,34 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function setCreatedAt(\DateTimeInterface $createdAt): static
+    {
+        $this->createdAt = $createdAt;
+        return $this;
+    }
+
+    public function isEmailVerified(): bool
+    {
+        return $this->emailVerified;
+    }
+
+    public function setEmailVerified(bool $emailVerified): static
+    {
+        $this->emailVerified = $emailVerified;
+        return $this;
+    }
+
+    public function isPhoneVerified(): bool
+    {
+        return $this->phoneVerified;
+    }
+
+    public function setPhoneVerified(bool $phoneVerified): static
+    {
+        $this->phoneVerified = $phoneVerified;
+        return $this;
     }
 
     public function getPasswordResetCode(): ?string

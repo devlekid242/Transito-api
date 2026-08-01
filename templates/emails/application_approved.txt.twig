@@ -1,0 +1,41 @@
+Félicitations ! Votre candidature de partenariat a été approuvée
+=====================================================================
+
+Bonjour {{ application.legalRepresentative }},
+
+Votre agence {{ application.agencyName }} est maintenant partenaire officielle de Tansico !
+
+INFORMATIONS DE VOTRE AGENCE
+----------------------------
+Nom: {{ application.agencyName }}
+Ville: {{ application.city }}
+Email: {{ application.email }}
+Téléphone: {{ application.phone }}
+
+VOS IDENTIFIANTS DE CONNEXION
+-----------------------------
+Email: {{ adminUser.email }}
+Nom complet: {{ adminUser.fullName }}
+Mot de passe: Votre mot de passe temporaire a été envoyé par SMS ou sera fourni lors de l'onboarding
+
+PROCHAINES ÉTAPES
+-----------------
+1. Connectez-vous avec vos identifiants ci-dessus
+2. Complétez votre profil d'agence
+3. Ajoutez vos véhicules et conducteurs
+4. Créez vos premiers trajets
+5. Commencez à accepter des réservations
+
+Accédez à votre tableau de bord: {{ loginUrl }}
+
+BIENVENUE CHEZ TANSICO
+----------------------
+Nous sommes ravis de vous compter parmi nos partenaires. Votre agence peut maintenant gérer ses trajets, réservations et clients de manière professionnelle.
+
+Si vous avez des questions ou besoin d'assistance, n'hésitez pas à nous contacter.
+
+Cordialement,
+L'équipe Tansico Partenariats
+
+Email: {{ supportEmail }}
+Téléphone: {{ supportPhone }}

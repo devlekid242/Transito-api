@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Nouvelle candidature reçue</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #fff; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .footer { background: #f8f9fa; padding: 20px; text-align: center; margin-top: 20px; border-radius: 10px; }
+        .btn { display: inline-block; background: #8b5cf6; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 15px 0; }
+        .btn:hover { background: #7c3aed; }
+        .highlight { background: #f5f3ff; padding: 15px; border-left: 4px solid #8b5cf6; margin: 15px 0; }
+        .info-box { background: #f8fafc; padding: 15px; border-radius: 8px; margin: 15px 0; }
+        .application-card { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 8px; padding: 15px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1 style="margin: 0; font-size: 28px;">📬 Nouvelle candidature</h1>
+            <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Une nouvelle demande de partenariat a été reçue</p>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+            <p>Bonjour administrateur,</p>
+
+            <div class="highlight">
+                <h2 style="margin: 0 0 10px 0; color: #7c3aed;">Une nouvelle candidature de partenariat a été soumise et nécessite votre attention.</h2>
+            </div>
+
+            <div class="application-card">
+                <h3 style="margin: 0 0 15px 0; color: #374151;">📋 Détails de la candidature</h3>
+                <p style="margin: 5px 0;"><strong>Référence:</strong> {{ application.ref }}</p>
+                <p style="margin: 5px 0;"><strong>Nom de l'agence:</strong> {{ application.agencyName }}</p>
+                <p style="margin: 5px 0;"><strong>Représentant légal:</strong> {{ application.legalRepresentative }}</p>
+                <p style="margin: 5px 0;"><strong>Email:</strong> {{ application.email }}</p>
+                <p style="margin: 5px 0;"><strong>Téléphone:</strong> {{ application.phone }}</p>
+                <p style="margin: 5px 0;"><strong>Ville:</strong> {{ application.city }}</p>
+                <p style="margin: 5px 0;"><strong>Soumise le:</strong> {{ submittedAt }}</p>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">📊 Informations supplémentaires</h3>
+                <p style="margin: 5px 0;"><strong>Taille de la flotte:</strong> {{ application.fleetSize }} bus</p>
+                <p style="margin: 5px 0;"><strong>Routes prévues:</strong> {{ application.routesPlanned|join(', ') }}</p>
+                <p style="margin: 5px 0;"><strong>Nombre de documents:</strong> {{ application.documents|length }}</p>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">📝 Description</h3>
+                <p style="margin: 10px 0; line-height: 1.8; border-left: 3px solid #e5e7eb; padding-left: 10px;">
+                    {{ application.description }}
+                </p>
+            </div>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="{{ adminDashboardUrl }}" class="btn">Voir la candidature</a>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">⚡ Actions recommandées</h3>
+                <ol style="margin: 10px 0 0 20px; padding: 0;">
+                    <li style="margin-bottom: 8px;">Vérifier que tous les documents requis sont présents</li>
+                    <li style="margin-bottom: 8px;">Valider les informations de l'agence</li>
+                    <li style="margin-bottom: 8px;">Contacter l'agence si des informations manquent</li>
+                    <li style="margin-bottom: 8px;">Prendre une décision (Approuver ou Rejeter) sous {{ estimatedProcessingTime }}</li>
+                </ol>
+            </div>
+
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
+                <p style="margin: 0; color: #6b7280; font-size: 14px;">
+                    Cette candidature attend votre revue. Merci de la traiter dans les meilleurs délais.
+                </p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p style="margin: 0; color: #6b7280;">
+                <strong>Système de gestion Tansico</strong>
+            </p>
+            <p style="margin: 10px 0 0 0; font-size: 12px; color: #9ca3af;">
+                Notification automatique - Veuillez ne pas répondre à cet email
+            </p>
+        </div>
+    </div>
+</body>
+</html>

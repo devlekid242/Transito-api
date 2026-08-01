@@ -48,12 +48,22 @@ class ApplicationApprovalService
         ApplicationApproveDto $dto,
         ?\Symfony\Component\Security\Core\User\UserInterface $currentUser = null
     ): array {
-        try {
-            // Step 1: Validate that the application can be approved
-            if ($application->getStatus() !== 'PENDING' && $application->getStatus() !== 'UNDER_REVIEW') {
-                throw new \LogicException('Only PENDING or UNDER_REVIEW applications can be approved');
-            }
+        // Step 1: Validate that the application can be approved
+        if ($application->getStatus() !== 'PENDING' && $application->getStatus() !== 'UNDER_REVIEW') {
+            throw new \LogicException('Only PENDING or UNDER_REVIEW applications can be approved');
+        }
 
+        $temporaryPassword = $dto->temporaryPassword ?? $this->generateTemporaryPassword();
+
+        // Tout le workflow s'exécute dans UNE seule transaction : soit tout est
+        // enregistré (agence + utilisateur + agent + candidature), soit rien ne
+        // l'est en cas d'erreur. On ne fait plus de flush() intermédiaire, et on
+        // ne fait plus appel à $this->em->rollback() : EntityManagerInterface ne
+        // possède pas cette méthode (elle existe sur Connection), donc le code
+        // précédent provoquait une seconde erreur fatale dans le catch, qui
+        // masquait la cause réelle, tout en laissant l'agence et l'utilisateur
+        // déjà flush() persistés en base malgré l'échec.
+        return $this->em->wrapInTransaction(function () use ($application, $dto, $currentUser, $temporaryPassword) {
             // Step 2: Create Agency entity
             $agency = new Agency();
             $agency->setName($dto->agencyNameOverride ?? $application->getAgencyName());
@@ -63,36 +73,34 @@ class ApplicationApprovalService
             $agency->setCity($application->getCity());
             $agency->setLegalRepresentative($dto->legalRepresentativeOverride ?? $application->getLegalRepresentative());
             $agency->setStatus('active');
-            $agency->setCommissionRate(10.0); // Default commission rate
+            $agency->setCommissionRate('10.00'); // commissionRate est un string (DECIMAL), pas un float
             $agency->setIsVerified(true);
-            $agency->setCreatedAt(new \DateTime());
 
             $this->em->persist($agency);
-            $this->em->flush(); // Flush to get the agency ID
 
             // Step 3: Create Admin User for the agency
             $adminUser = new User();
             $adminUser->setFullName($application->getLegalRepresentative());
             $adminUser->setEmail($application->getEmail());
             $adminUser->setPhoneNumber($application->getPhone());
-            $adminUser->setPassword($this->hashTemporaryPassword($dto->temporaryPassword ?? $this->generateTemporaryPassword()));
+            $adminUser->setPassword($this->hashTemporaryPassword($adminUser, $temporaryPassword));
             $adminUser->setStatus('active');
             $adminUser->setEmailVerified(true);
             $adminUser->setPhoneVerified(false);
             $adminUser->setVilleResidence($application->getCity());
-            $adminUser->setCreatedAt(new \DateTime());
 
             $this->em->persist($adminUser);
-            $this->em->flush(); // Flush to get the user ID
 
-            // Step 4: Create Agent relationship between user and agency
+            // Step 4: Create Agent relationship between user and agency.
+            // 'admin_agence' est la seule valeur autorisée par Agent::$agentRole
+            // (Assert\Choice) pour un rôle d'administrateur d'agence — 'ADMIN'
+            // violait cette contrainte.
             $agent = new Agent();
             $agent->setUser($adminUser);
             $agent->setAgency($agency);
-            $agent->setAgentRole('ADMIN');
+            $agent->setAgentRole('admin_agence');
             $agent->setStatus('active');
-            $agent->setCommissionRate(0.0); // Agency admin doesn't earn commission on their own agency
-            $agent->setCreatedAt(new \DateTime());
+            $agent->setCommissionRate('0.00'); // L'admin ne touche pas de commission sur sa propre agence
 
             $this->em->persist($agent);
 
@@ -101,7 +109,7 @@ class ApplicationApprovalService
             $application->setAdminUser($adminUser);
             $application->setStatus('APPROVED');
             $application->setReviewedAt(new \DateTime());
-            $application->setReviewer($currentUser?->getEmail() ?? 'System');
+            $application->setReviewer($currentUser?->getUserIdentifier() ?? 'System');
             if ($dto->reviewerNotes) {
                 $application->setReviewerNotes($dto->reviewerNotes);
             }
@@ -115,14 +123,9 @@ class ApplicationApprovalService
             return [
                 'agencyId' => $agency->getId(),
                 'adminUserId' => $adminUser->getId(),
-                'temporaryPassword' => $dto->temporaryPassword ?? null,
+                'temporaryPassword' => $temporaryPassword,
             ];
-
-        } catch (\Exception $e) {
-            // Rollback any changes if something went wrong
-            $this->em->rollback();
-            throw $e;
-        }
+        });
     }
 
     /**
@@ -140,16 +143,16 @@ class ApplicationApprovalService
         ApplicationRejectDto $dto,
         ?\Symfony\Component\Security\Core\User\UserInterface $currentUser = null
     ): array {
-        try {
-            // Validate that the application can be rejected
-            if ($application->getStatus() !== 'PENDING' && $application->getStatus() !== 'UNDER_REVIEW') {
-                throw new \LogicException('Only PENDING or UNDER_REVIEW applications can be rejected');
-            }
+        // Validate that the application can be rejected
+        if ($application->getStatus() !== 'PENDING' && $application->getStatus() !== 'UNDER_REVIEW') {
+            throw new \LogicException('Only PENDING or UNDER_REVIEW applications can be rejected');
+        }
 
+        return $this->em->wrapInTransaction(function () use ($application, $dto, $currentUser) {
             // Update application
             $application->setStatus('REJECTED');
             $application->setReviewedAt(new \DateTime());
-            $application->setReviewer($currentUser?->getEmail() ?? 'System');
+            $application->setReviewer($currentUser?->getUserIdentifier() ?? 'System');
             $application->setRejectionReason($dto->rejectionReason);
             if ($dto->reviewerNotes) {
                 $application->setReviewerNotes($dto->reviewerNotes);
@@ -165,11 +168,7 @@ class ApplicationApprovalService
                 'applicationId' => $application->getId(),
                 'rejectionReason' => $dto->rejectionReason,
             ];
-
-        } catch (\Exception $e) {
-            $this->em->rollback();
-            throw $e;
-        }
+        });
     }
 
     /**
@@ -190,9 +189,9 @@ class ApplicationApprovalService
     /**
      * Hash a temporary password.
      */
-    private function hashTemporaryPassword(string $password): string
+    private function hashTemporaryPassword(User $user, string $password): string
     {
-        return $this->passwordHasher->hash($password);
+        return $this->passwordHasher->hashPassword($user, $password);
     }
 
     /**

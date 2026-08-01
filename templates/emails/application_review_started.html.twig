@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Candidature en revue</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #fff; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .footer { background: #f8f9fa; padding: 20px; text-align: center; margin-top: 20px; border-radius: 10px; }
+        .highlight { background: #eff6ff; padding: 15px; border-left: 4px solid #3b82f6; margin: 15px 0; }
+        .info-box { background: #f8fafc; padding: 15px; border-radius: 8px; margin: 15px 0; }
+        .progress-bar { background: #e5e7eb; border-radius: 10px; height: 8px; margin: 15px 0; overflow: hidden; }
+        .progress-fill { background: #3b82f6; height: 100%; width: 66%; border-radius: 10px; }
+        .steps { display: flex; justify-content: space-between; margin: 20px 0; }
+        .step { display: flex; align-items: center; flex-direction: column; text-align: center; }
+        .step-icon { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+        .step-completed { background: #10b981; color: white; }
+        .step-current { background: #3b82f6; color: white; }
+        .step-pending { background: #e5e7eb; color: #9ca3af; }
+        .step-line { flex: 1; height: 2px; background: #e5e7eb; margin: 0 10px; align-self: center; max-width: 80px; }
+        .step-line-active { background: #3b82f6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1 style="margin: 0; font-size: 28px;">⏳ Candidature en cours de revue</h1>
+            <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Votre demande est en cours d'examen</p>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+            <p>Bonjour {{ application.legalRepresentative }},</p>
+
+            <div class="highlight">
+                <h2 style="margin: 0 0 10px 0; color: #2563eb;">Votre candidature pour l'agence <strong>{{ application.agencyName }}</strong> est en cours de revue par notre équipe.</h2>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">📋 Détails de votre candidature</h3>
+                <p style="margin: 5px 0;"><strong>Référence:</strong> {{ application.ref }}</p>
+                <p style="margin: 5px 0;"><strong>Nom de l'agence:</strong> {{ application.agencyName }}</p>
+                <p style="margin: 5px 0;"><strong>Soumise le:</strong> {{ application.submittedAt }}</p>
+                <p style="margin: 5px 0;"><strong>Revue par:</strong> {{ reviewer }}</p>
+            </div>
+
+            <!-- Progress -->
+            <div class="info-box">
+                <h3 style="margin: 0 0 15px 0; color: #374151;">📊 État de votre candidature</h3>
+                
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: 66%;"></div>
+                </div>
+                
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-icon step-completed">✓</div>
+                        <span style="font-size: 12px; color: #10b981;">Soumise</span>
+                    </div>
+                    <div class="step-line step-line-active"></div>
+                    <div class="step">
+                        <div class="step-icon step-current">🔍</div>
+                        <span style="font-size: 12px; color: #3b82f6; font-weight: bold;">En revue</span>
+                    </div>
+                    <div class="step-line"></div>
+                    <div class="step">
+                        <div class="step-icon step-pending">✓</div>
+                        <span style="font-size: 12px; color: #9ca3af;">Décision</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">⏰ Délai estimé</h3>
+                <p style="margin: 10px 0;">Notre équipe examine généralement les candidatures sous <strong>{{ estimatedProcessingTime }}</strong>.</p>
+                <p style="margin: 10px 0;">Vous recevrez une notification par email dès qu'une décision sera prise.</p>
+            </div>
+
+            <div class="info-box">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">💡 Documents soumis</h3>
+                <p style="margin: 10px 0;">Nous vérifions que tous les documents requis sont présents et valides.</p>
+                <ul style="margin: 10px 0 0 20px; padding: 0;">
+                    <li style="margin-bottom: 8px;">Registre du Commerce et du Crédit Mobilier (RCCM)</li>
+                    <li style="margin-bottom: 8px;">Numéro d'Identification Nationale des Employeurs (NINEA)</li>
+                    <li style="margin-bottom: 8px;">Assurance Flotte</li>
+                    <li style="margin-bottom: 8px;">Autres documents support</li>
+                </ul>
+            </div>
+
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+                <h3 style="margin: 0 0 10px 0; color: #374151;">🤝 Questions ?</h3>
+                <p style="margin: 10px 0;">Si vous avez des questions concernant votre candidature ou le processus de revue, n'hésitez pas à nous contacter.</p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p style="margin: 0; color: #6b7280;">
+                Cordialement,<br>
+                <strong>L'équipe Tansico Partenariats</strong>
+            </p>
+            <p style="margin: 10px 0 0 0; font-size: 12px; color: #9ca3af;">
+                📧 Email: {{ supportEmail }} | 📞 Téléphone: {{ supportPhone }}
+            </p>
+        </div>
+    </div>
+</body>
+</html>

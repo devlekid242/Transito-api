@@ -20,10 +20,7 @@ class ApplicationEmailService
         private Environment $twig,
         private string $fromEmail,
         private string $fromName,
-    ) {
-        $this->fromEmail = $_ENV['MAILER_FROM_EMAIL'] ?? 'noreply@tansico.com';
-        $this->fromName = $_ENV['MAILER_FROM_NAME'] ?? 'Tansico Partenariats';
-    }
+    ) {}
 
     /**
      * Send approval notification email to the applicant.
@@ -127,6 +124,7 @@ class ApplicationEmailService
             'reviewerNotes' => $application->getReviewerNotes(),
             'supportEmail' => 'partenariats@tansico.com',
             'supportPhone' => '+221 77 123 45 67',
+            'enrollmentUrl' => $this->getEnrollmentUrl(),
         ]);
     }
 
@@ -141,6 +139,7 @@ class ApplicationEmailService
             'reviewerNotes' => $application->getReviewerNotes(),
             'supportEmail' => 'partenariats@tansico.com',
             'supportPhone' => '+221 77 123 45 67',
+            'enrollmentUrl' => $this->getEnrollmentUrl(),
         ]);
     }
 
@@ -154,6 +153,7 @@ class ApplicationEmailService
             'reviewer' => $application->getReviewer(),
             'estimatedProcessingTime' => '2-5 jours ouvrables',
             'supportEmail' => 'partenariats@tansico.com',
+            'supportPhone' => '+221 77 123 45 67',
         ]);
     }
 
@@ -167,6 +167,7 @@ class ApplicationEmailService
             'reviewer' => $application->getReviewer(),
             'estimatedProcessingTime' => '2-5 jours ouvrables',
             'supportEmail' => 'partenariats@tansico.com',
+            'supportPhone' => '+221 77 123 45 67',
         ]);
     }
 
@@ -179,6 +180,9 @@ class ApplicationEmailService
             'application' => $application,
             'adminDashboardUrl' => $this->getAdminDashboardUrl() . '/applications/' . $application->getId(),
             'submittedAt' => $application->getSubmittedAt()?->format('d/m/Y H:i'),
+            'estimatedProcessingTime' => '2-5 jours ouvrables',
+            'supportEmail' => 'partenariats@tansico.com',
+            'supportPhone' => '+221 77 123 45 67',
         ]);
     }
 
@@ -191,6 +195,9 @@ class ApplicationEmailService
             'application' => $application,
             'adminDashboardUrl' => $this->getAdminDashboardUrl() . '/applications/' . $application->getId(),
             'submittedAt' => $application->getSubmittedAt()?->format('d/m/Y H:i'),
+            'estimatedProcessingTime' => '2-5 jours ouvrables',
+            'supportEmail' => 'partenariats@tansico.com',
+            'supportPhone' => '+221 77 123 45 67',
         ]);
     }
 
