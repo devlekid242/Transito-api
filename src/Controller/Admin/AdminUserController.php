@@ -20,6 +20,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Serializer\SerializerInterface;
+use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 /**
  * Admin User Controller for User Management in Super Admin Dashboard.
@@ -140,7 +141,7 @@ class AdminUserController extends AbstractController
 
         // Count user reservations
         $reservationsCount = $this->reservationRepository->count(['user' => $user]);
-        
+
         // Count user cancellations (reservations with cancelled or no_show status)
         $cancellationsCount = $this->reservationRepository->countUserCancellations($user);
 
@@ -187,12 +188,12 @@ class AdminUserController extends AbstractController
 
         // Total users (excluding pure admins for client count)
         $totalUsers = $this->userRepository->count([]);
-        
+
         // Count by role
         $totalClients = $this->countUsersByRole('CLIENT');
         $totalAgents = $this->countUsersByRole('AGENT');
         $totalAdmins = $this->adminRepository->count([]);
-        
+
         // Active/inactive counts
         $activeUsers = $this->userRepository->count(['status' => 'active']);
         $suspendedUsers = $this->userRepository->count(['status' => 'suspended']);
@@ -238,7 +239,7 @@ class AdminUserController extends AbstractController
     public function getUserProfile(int $id): JsonResponse
     {
         $user = $this->userRepository->find($id);
-        
+
         if (!$user) {
             return $this->json([
                 'success' => false,
@@ -260,7 +261,9 @@ class AdminUserController extends AbstractController
         );
 
         // Get user payment logs (transactions) via reservations
-        $reservationIds = array_map(function($r) { return $r->getId(); }, $reservations);
+        $reservationIds = array_map(function ($r) {
+            return $r->getId();
+        }, $reservations);
         $transactions = empty($reservationIds) ? [] : $this->paymentLogRepository->createQueryBuilder('pl')
             ->where('pl.reservation IN (:reservationIds)')
             ->setParameter('reservationIds', $reservationIds)
@@ -311,7 +314,7 @@ class AdminUserController extends AbstractController
                 'user' => $userData,
                 'stats' => $stats,
                 'reservations' => array_map([$this, 'normalizeReservationForProfile'], $reservations),
-                'cancellations' => array_map([$this, 'normalizeReservationForProfile'], array_filter($reservations, function($r) {
+                'cancellations' => array_map([$this, 'normalizeReservationForProfile'], array_filter($reservations, function ($r) {
                     return in_array(strtolower($r->getPaymentStatus() ?? ''), ['rembourse', 'echoue']);
                 })),
                 'transactions' => array_map([$this, 'normalizeTransactionForProfile'], $transactions),
@@ -388,24 +391,24 @@ class AdminUserController extends AbstractController
     private function normalizeReservationForProfile(Reservation $reservation): array
     {
         $trip = $reservation->getTrip();
-        
+
         // Create route string from departure and arrival cities
         $route = 'Inconnue';
         $departureTime = 'N/A';
         $agencyName = 'Inconnue';
-        
+
         if ($trip) {
             $departureCity = $trip->getDepartureCity() ?? 'N/A';
             $arrivalCity = $trip->getArrivalCity() ?? 'N/A';
             $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A' ? $departureCity . ' → ' . $arrivalCity : 'Inconnue';
-            
+
             $departureTimeObj = $trip->getDepartureTime();
             $departureTime = $departureTimeObj ? $departureTimeObj->format('H:i') : 'N/A';
-            
+
             $agency = $trip->getAgency();
             $agencyName = $agency ? $agency->getName() : 'Inconnue';
         }
-        
+
         return [
             'id' => $reservation->getId(),
             'reference' => $reservation->getTransactionReference() ?? 'N/A',
@@ -427,7 +430,7 @@ class AdminUserController extends AbstractController
     private function normalizeReservationStatus(?string $status): string
     {
         if (!$status) return 'PENDING';
-        
+
         $statusMap = [
             'en_attente' => 'PENDING',
             'confirmed' => 'CONFIRMED',
@@ -447,7 +450,7 @@ class AdminUserController extends AbstractController
             'rembourse' => 'REFUNDED',
             'remboursée' => 'REFUNDED',
         ];
-        
+
         return $statusMap[strtolower($status)] ?? strtoupper($status);
     }
 
@@ -458,16 +461,16 @@ class AdminUserController extends AbstractController
     {
         $reservation = $paymentLog->getReservation();
         $amount = (float) $paymentLog->getAmount();
-        
+
         // Infer type from context
         $type = 'PAYMENT'; // Default to payment
         if ($amount < 0) {
             $type = 'REFUND';
         }
-        
+
         // Get payment method from reservation
         $paymentMethod = $reservation ? $reservation->getPaymentMethod() : $paymentLog->getOperator();
-        
+
         // Create label based on reservation info
         $label = 'Transaction #' . $paymentLog->getId();
         if ($reservation) {
@@ -476,7 +479,7 @@ class AdminUserController extends AbstractController
                 $label = sprintf('Paiement: %s -> %s', $trip->getDepartureCity(), $trip->getArrivalCity());
             }
         }
-        
+
         return [
             'id' => $paymentLog->getId(),
             'type' => $type,
@@ -497,7 +500,7 @@ class AdminUserController extends AbstractController
     private function normalizeTransactionStatus(?string $status): string
     {
         if (!$status) return 'PENDING';
-        
+
         $statusMap = [
             'en_attente' => 'PENDING',
             'pending' => 'PENDING',
@@ -512,7 +515,7 @@ class AdminUserController extends AbstractController
             'rembourse' => 'REFUNDED',
             'remboursée' => 'REFUNDED',
         ];
-        
+
         return $statusMap[strtolower($status)] ?? strtoupper($status);
     }
 
@@ -523,7 +526,7 @@ class AdminUserController extends AbstractController
     public function toggleUserStatus(int $id): JsonResponse
     {
         $user = $this->userRepository->find($id);
-        
+
         if (!$user) {
             return $this->json([
                 'success' => false,
@@ -533,20 +536,20 @@ class AdminUserController extends AbstractController
 
         // Check if user is an agent
         $agent = $this->agentRepository->findOneBy(['user' => $user]);
-        
+
         // Determine current effective status
         $currentStatus = $user->getStatus();
         $newStatus = $currentStatus === 'active' ? 'suspended' : 'active';
 
         // Update user status
         $user->setStatus($newStatus);
-        
+
         // If user is an agent, also update agent status
         if ($agent) {
             $agent->setStatus($newStatus === 'active' ? 'active' : 'inactive');
             $this->em->persist($agent);
         }
-        
+
         $this->em->persist($user);
         $this->em->flush();
 
@@ -577,7 +580,7 @@ class AdminUserController extends AbstractController
         $totalUsers = $this->userRepository->count([]);
         $totalAdmins = $this->adminRepository->count([]);
         $totalAgents = $this->agentRepository->count([]);
-        
+
         return $totalUsers - $totalAdmins - $totalAgents;
     }
 
@@ -587,13 +590,22 @@ class AdminUserController extends AbstractController
     private function getAvatarColor(?int $userId): string
     {
         if (!$userId) return 'bg-gray-500';
-        
+
         $colors = [
-            'bg-rose-500', 'bg-green-500', 'bg-amber-500', 'bg-cyan-500',
-            'bg-violet-500', 'bg-pink-500', 'bg-indigo-500', 'bg-emerald-500',
-            'bg-teal-500', 'bg-orange-500', 'bg-sky-500', 'bg-lime-500',
+            'bg-rose-500',
+            'bg-green-500',
+            'bg-amber-500',
+            'bg-cyan-500',
+            'bg-violet-500',
+            'bg-pink-500',
+            'bg-indigo-500',
+            'bg-emerald-500',
+            'bg-teal-500',
+            'bg-orange-500',
+            'bg-sky-500',
+            'bg-lime-500',
         ];
-        
+
         $index = ($userId % count($colors));
         return $colors[$index] ?? 'bg-green-500';
     }

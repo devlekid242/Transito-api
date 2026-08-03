@@ -10,7 +10,7 @@ use Doctrine\Migrations\AbstractMigration;
 /**
  * Auto-generated Migration: Please modify to your needs!
  */
-final class Version20260801083356 extends AbstractMigration
+final class Version20260803145507 extends AbstractMigration
 {
     public function getDescription(): string
     {
@@ -30,6 +30,7 @@ final class Version20260801083356 extends AbstractMigration
         $this->addSql('CREATE TABLE `buses` (id INT AUTO_INCREMENT NOT NULL, registration_number VARCHAR(30) NOT NULL, capacity INT NOT NULL, category VARCHAR(30) DEFAULT \'Classique\' NOT NULL, status VARCHAR(30) DEFAULT \'disponible\' NOT NULL, brand VARCHAR(100) DEFAULT NULL, model VARCHAR(100) DEFAULT NULL, color VARCHAR(50) DEFAULT NULL, acquisition_date DATE DEFAULT NULL, mileage INT DEFAULT NULL, last_maintenance_date DATE DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, agency_id INT NOT NULL, UNIQUE INDEX UNIQ_FE00EAF338CEDFBE (registration_number), INDEX IDX_FE00EAF3CDEADB2A (agency_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `cities` (id INT AUTO_INCREMENT NOT NULL, name VARCHAR(100) NOT NULL, code VARCHAR(10) DEFAULT NULL, country VARCHAR(100) DEFAULT NULL, is_active SMALLINT DEFAULT 1 NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, UNIQUE INDEX UNIQ_D95DB16B5E237E06 (name), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `device_tokens` (id INT AUTO_INCREMENT NOT NULL, token VARCHAR(255) NOT NULL, platform VARCHAR(20) NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at DATETIME DEFAULT NULL, user_id INT NOT NULL, UNIQUE INDEX UNIQ_794A60955F37A13B (token), INDEX IDX_794A6095A76ED395 (user_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
+        $this->addSql('CREATE TABLE `faqs` (id INT AUTO_INCREMENT NOT NULL, question VARCHAR(255) NOT NULL, answer LONGTEXT NOT NULL, category VARCHAR(100) DEFAULT \'general\' NOT NULL, order_priority INT DEFAULT 0 NOT NULL, is_active TINYINT DEFAULT 1 NOT NULL, created_at VARCHAR(255) NOT NULL, updated_at VARCHAR(255) DEFAULT NULL, PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `notifications` (id INT AUTO_INCREMENT NOT NULL, recipient_type VARCHAR(50) NOT NULL, recipient_id INT DEFAULT NULL, title VARCHAR(150) NOT NULL, content LONGTEXT NOT NULL, category VARCHAR(50) DEFAULT \'INFO\' NOT NULL, payload JSON DEFAULT NULL, is_read SMALLINT DEFAULT 0 NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `partnership_applications` (id INT AUTO_INCREMENT NOT NULL, reference VARCHAR(50) NOT NULL, agency_name VARCHAR(100) NOT NULL, legal_representative VARCHAR(100) NOT NULL, email VARCHAR(255) NOT NULL, phone VARCHAR(20) NOT NULL, city VARCHAR(50) NOT NULL, address LONGTEXT DEFAULT NULL, fleet_size SMALLINT NOT NULL, routes_planned JSON NOT NULL, description LONGTEXT NOT NULL, status VARCHAR(20) DEFAULT \'PENDING\' NOT NULL, submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, reviewed_at DATETIME DEFAULT NULL, reviewer VARCHAR(100) DEFAULT NULL, rejection_reason LONGTEXT DEFAULT NULL, reviewer_notes LONGTEXT DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, agency_id INT DEFAULT NULL, admin_user_id INT DEFAULT NULL, UNIQUE INDEX UNIQ_C941750FAEA34913 (reference), UNIQUE INDEX UNIQ_C941750FCDEADB2A (agency_id), UNIQUE INDEX UNIQ_C941750F6352511C (admin_user_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `payment_logs` (id INT AUTO_INCREMENT NOT NULL, operator VARCHAR(50) NOT NULL, reference VARCHAR(100) NOT NULL, amount NUMERIC(10, 2) NOT NULL, status VARCHAR(30) NOT NULL, raw_response LONGTEXT DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, processed_at DATETIME DEFAULT NULL, reservation_id INT DEFAULT NULL, user_id INT DEFAULT NULL, INDEX IDX_D10C5128B83297E7 (reservation_id), INDEX IDX_D10C5128A76ED395 (user_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
@@ -141,6 +142,7 @@ final class Version20260801083356 extends AbstractMigration
         $this->addSql('DROP TABLE `buses`');
         $this->addSql('DROP TABLE `cities`');
         $this->addSql('DROP TABLE `device_tokens`');
+        $this->addSql('DROP TABLE `faqs`');
         $this->addSql('DROP TABLE `notifications`');
         $this->addSql('DROP TABLE `partnership_applications`');
         $this->addSql('DROP TABLE `payment_logs`');

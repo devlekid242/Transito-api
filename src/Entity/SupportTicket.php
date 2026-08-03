@@ -3,13 +3,33 @@
 namespace App\Entity;
 
 use Doctrine\ORM\Mapping as ORM;
-use ApiPlatform\Metadata\ApiResource;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
+use Symfony\Component\Validator\Constraints as Assert;
 
+/**
+ * IMPORTANT — correction de sécurité :
+ * L'entité portait auparavant #[ApiResource] SANS spécifier d'opérations,
+ * ce qui active par défaut le CRUD complet d'API Platform (Get, GetCollection,
+ * Post, Put, Patch, Delete) SANS AUCUNE CONTRAINTE DE SÉCURITÉ.
+ * Concrètement, n'importe quel utilisateur (authentifié ou non, selon le
+ * firewall) pouvait lister TOUS les tickets de TOUS les usagers, les modifier
+ * ou les supprimer via /api/support_tickets.
+ *
+ * La création et la consultation des tickets sont déjà gérées par des
+ * endpoints dédiés (SupportResponse::createTicket, ::getMyTickets) et
+ * l'administration par AdminSupportController. Cette entité n'a donc plus
+ * besoin d'être exposée comme ApiResource générique : l'attribut est retiré.
+ *
+ * Si un accès API Platform direct à SupportTicket est réellement nécessaire,
+ * il doit être réintroduit avec des opérations explicites et sécurisées,
+ * par exemple :
+ *   - GetCollection avec un security "is_granted('ROLE_ADMIN')"
+ *   - Get avec un security "object.getUser() == user or is_granted('ROLE_ADMIN')"
+ * et ne jamais laisser d'opérations sans "operations:" explicite.
+ */
 #[ORM\Entity]
 #[ORM\Table(name: '`support_tickets`')]
-#[ApiResource]
 class SupportTicket
 {
     #[ORM\Id]
@@ -22,18 +42,25 @@ class SupportTicket
     private ?User $user = null;
 
     #[ORM\Column(length: 255)]
+    #[Assert\NotBlank(message: 'Le sujet ne peut pas être vide.')]
+    #[Assert\Length(max: 255)]
     private ?string $subject = null;
 
     #[ORM\Column(type: 'text')]
+    #[Assert\NotBlank(message: 'Le message ne peut pas être vide.')]
     private ?string $message = null;
 
     #[ORM\Column(length: 50)]
+    #[Assert\NotBlank]
+    #[Assert\Length(max: 50)]
     private ?string $category = null;
 
     #[ORM\Column(length: 30, options: ['default' => 'open'])]
+    #[Assert\Choice(choices: ['open', 'answered', 'closed', 'pending'])]
     private string $status = 'open';
 
     #[ORM\Column(length: 20, options: ['default' => 'medium'])]
+    #[Assert\Choice(choices: ['low', 'medium', 'high', 'critical'])]
     private string $priority = 'medium';
 
     #[ORM\OneToMany(mappedBy: 'ticket', targetEntity: SupportResponse::class, cascade: ['persist', 'remove'])]

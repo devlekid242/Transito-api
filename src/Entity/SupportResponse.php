@@ -15,12 +15,24 @@ use App\Controller\SupportController;
         new Post(
             uriTemplate: '/support/tickets',
             controller: SupportController::class . '::createTicket',
-            name: 'api_support_create_ticket'
+            name: 'api_support_create_ticket',
+            // Correction : aucune sécurité n'était définie — n'importe quel
+            // visiteur pouvait créer un ticket au nom d'un autre utilisateur
+            // si le contrôleur ne vérifie pas explicitement l'identité.
+            security: "is_granted('ROLE_USER')"
         ),
         new GetCollection(
             uriTemplate: '/support/my-tickets',
             controller: SupportController::class . '::getMyTickets',
-            name: 'api_support_my_tickets'
+            name: 'api_support_my_tickets',
+            // Correction : sans cette contrainte, un utilisateur non
+            // authentifié pouvait potentiellement appeler cette route.
+            // ATTENTION : le contrôleur SupportController (non fourni) doit
+            // impérativement filtrer les résultats sur l'utilisateur courant
+            // ($this->getUser()) — cette annotation seule ne suffit pas à
+            // empêcher un utilisateur connecté de voir les tickets des autres
+            // si le contrôleur ne fait pas ce filtrage lui-même.
+            security: "is_granted('ROLE_USER')"
         )
     ]
 )]
