@@ -12,6 +12,7 @@ use App\Repository\ReservationRepository;
 use App\Repository\TripRepository;
 use App\Repository\WalletRepository;
 use App\Repository\WalletTransactionRepository;
+use App\Service\StatusMapperService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -35,6 +36,7 @@ class AdminAgencyController extends AbstractController
         private ReservationRepository $reservationRepository,
         private WalletRepository $walletRepository,
         private WalletTransactionRepository $walletTransactionRepository,
+        private StatusMapperService $statusMapperService,
     ) {}
 
     /**
@@ -455,7 +457,27 @@ class AdminAgencyController extends AbstractController
             ->orderBy('t.departureTime', 'DESC');
 
         if ($status) {
-            $qb->andWhere('t.status = :status')->setParameter('status', $status);
+            $statusMap = [
+                'SCHEDULED' => ['planifie'],
+                'IN_PROGRESS' => ['embarquement', 'en_route'],
+                'COMPLETED' => ['termine'],
+                'CANCELLED' => ['annule'],
+                'DELAYED' => ['annule'],
+                'planifie' => ['planifie'],
+                'embarquement' => ['embarquement'],
+                'en_route' => ['en_route'],
+                'termine' => ['termine'],
+                'annule' => ['annule'],
+            ];
+
+            $resolved = $statusMap[$status] ?? null;
+            if ($resolved !== null) {
+                if (count($resolved) > 1) {
+                    $qb->andWhere('t.status IN (:status)')->setParameter('status', $resolved);
+                } else {
+                    $qb->andWhere('t.status = :status')->setParameter('status', $resolved[0]);
+                }
+            }
         }
 
         $countQb = clone $qb;
@@ -654,15 +676,21 @@ class AdminAgencyController extends AbstractController
         $capacity = $trip->getBus()?->getCapacity() ?? 0;
         $reserved = $trip->getSeatsReserved();
 
+        $tripDate = $trip->getTripDate()?->format('Y-m-d') ?? $trip->getDepartureTime()?->format('Y-m-d');
+        $departureTimeOfDay = $trip->getDepartureTimeOfDay()?->format('H:i') ?? $trip->getDepartureTime()?->format('H:i');
+        $arrivalTimeOfDay = $trip->getArrivalTimeOfDay()?->format('H:i') ?? $trip->getEstimatedArrivalTime()?->format('H:i');
+
         return [
             'id' => $trip->getId(),
             'departureCity' => $trip->getDepartureCity(),
             'arrivalCity' => $trip->getArrivalCity(),
             'departureTime' => $trip->getDepartureTime()?->format(\DateTimeInterface::ATOM),
             'estimatedArrivalTime' => $trip->getEstimatedArrivalTime()?->format(\DateTimeInterface::ATOM),
-            'tripDate' => $trip->getTripDate()?->format('Y-m-d'),
+            'tripDate' => $tripDate,
+            'departureTimeOfDay' => $departureTimeOfDay,
+            'arrivalTimeOfDay' => $arrivalTimeOfDay,
             'price' => (float) $trip->getPrice(),
-            'status' => $trip->getStatus(),
+            'status' => $this->statusMapperService->mapTripStatus($trip->getStatus()),
             'seatsReserved' => $reserved,
             'maxSeats' => $capacity,
             'availableSeats' => max(0, $capacity - $reserved),

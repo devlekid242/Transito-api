@@ -5,6 +5,7 @@ namespace App\Controller\Admin;
 use App\Entity\User;
 use App\Entity\Admin;
 use App\Repository\AdminRepository;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -69,8 +70,18 @@ class AdminAuthController extends AbstractController
      * Logout (just return success, token invalidation handled by frontend)
      */
     #[Route('/logout', name: 'api_admin_auth_logout', methods: ['POST'])]
-    public function logout(): JsonResponse
+    public function logout(AdminNotificationService $adminNotificationService): JsonResponse
     {
+        $user = $this->getUser();
+        if ($user instanceof User) {
+            $adminNotificationService->notifyEvent(
+                'Déconnexion administrateur',
+                sprintf('%s a quitté le back-office.', $user->getFullName() ?? $user->getEmail() ?? 'Un administrateur'),
+                'INFO',
+                ['userId' => $user->getId(), 'type' => 'admin_logout']
+            );
+        }
+
         return $this->json(['message' => 'Logged out successfully']);
     }
 

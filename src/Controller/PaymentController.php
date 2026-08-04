@@ -6,6 +6,7 @@ use App\Entity\Notification;
 use App\Entity\PaymentLog;
 use App\Entity\Reservation;
 use App\Entity\User;
+use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -22,6 +23,7 @@ class PaymentController extends AbstractController
     public function __construct(
         private EntityManagerInterface $em,
         private NotificationBroadcastService $notificationBroadcaster,
+        private AdminNotificationService $adminNotificationService,
         private WalletService $walletService,
     ) {}
 
@@ -159,6 +161,13 @@ class PaymentController extends AbstractController
         if (isset($notification)) {
             $this->notificationBroadcaster->broadcast($notification);
         }
+
+        $this->adminNotificationService->notifyEvent(
+            'Paiement confirmé',
+            sprintf('Le paiement de la réservation #%d a été confirmé.', $reservation->getId()),
+            'PAYMENT',
+            ['reservationId' => $reservation->getId(), 'paymentLogId' => $log->getId()]
+        );
 
         return new JsonResponse([
             'success' => true,

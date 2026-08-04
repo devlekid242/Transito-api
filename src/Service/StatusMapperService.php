@@ -4,6 +4,68 @@ namespace App\Service;
 
 class StatusMapperService
 {
+    public function normalizeTripStatus(?string $status): string
+    {
+        if ($status === null || trim($status) === '') {
+            return 'planifie';
+        }
+
+        $normalized = strtolower(trim($status));
+        $map = [
+            'scheduled' => 'planifie',
+            'planifie' => 'planifie',
+            'boarding' => 'embarquement',
+            'embarquement' => 'embarquement',
+            'in_progress' => 'en_route',
+            'inprogress' => 'en_route',
+            'en_route' => 'en_route',
+            'completed' => 'termine',
+            'termine' => 'termine',
+            'cancelled' => 'annule',
+            'canceled' => 'annule',
+            'annule' => 'annule',
+        ];
+
+        return $map[$normalized] ?? 'planifie';
+    }
+
+    public function normalizeTicketStatus(?string $status): string
+    {
+        if ($status === null || trim($status) === '') {
+            return 'en_attente';
+        }
+
+        $normalized = strtolower(trim($status));
+        $map = [
+            'pending' => 'en_attente',
+            'en_attente' => 'en_attente',
+            'boarded' => 'embarque',
+            'embarque' => 'embarque',
+            'cancelled' => 'annule',
+            'canceled' => 'annule',
+            'annule' => 'annule',
+        ];
+
+        return $map[$normalized] ?? 'en_attente';
+    }
+
+    public function normalizeWithdrawalStatus(?string $status): string
+    {
+        if ($status === null || trim($status) === '') {
+            return 'pending';
+        }
+
+        $normalized = strtolower(trim($status));
+        $map = [
+            'pending' => 'pending',
+            'approved' => 'approved',
+            'rejected' => 'rejected',
+            'pended' => 'pending',
+        ];
+
+        return $map[$normalized] ?? 'pending';
+    }
+
     /**
      * Map backend trip status to frontend status
      */
@@ -17,7 +79,7 @@ class StatusMapperService
             'annule' => 'CANCELLED'
         ];
 
-        return $map[$backendStatus] ?? ucfirst($backendStatus);
+        return $map[$this->normalizeTripStatus($backendStatus)] ?? ucfirst($backendStatus);
     }
 
     /**
@@ -45,7 +107,7 @@ class StatusMapperService
             'annule' => 'CANCELLED'
         ];
 
-        return $map[$backendStatus] ?? 'NOT_FOUND';
+        return $map[$this->normalizeTicketStatus($backendStatus)] ?? 'NOT_FOUND';
     }
 
     /**

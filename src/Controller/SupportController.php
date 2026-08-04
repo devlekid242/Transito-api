@@ -7,6 +7,7 @@ use App\Entity\SupportResponse;
 use App\Entity\SupportTicket;
 use App\Repository\UserRepository;
 use App\Service\AdminNotificationHelper;
+use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -20,6 +21,7 @@ class SupportController extends AbstractController
         private EntityManagerInterface $em,
         private NotificationBroadcastService $notificationBroadcaster,
         private AdminNotificationHelper $adminNotifier,
+        private AdminNotificationService $adminNotificationService,
         private UserRepository $user_repository
     ) {}
 
@@ -68,6 +70,12 @@ class SupportController extends AbstractController
             ),
             'SUPPORT',
             ['ticketId' => $ticket->getId()],
+        );
+        $this->adminNotificationService->notifyEvent(
+            'Nouveau ticket de support',
+            sprintf('Un nouveau ticket a été soumis : « %s ».', $ticket->getSubject()),
+            'SUPPORT',
+            ['ticketId' => $ticket->getId()]
         );
 
         return new JsonResponse(['id' => $ticket->getId()], 201);

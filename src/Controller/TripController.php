@@ -11,7 +11,9 @@ use App\Repository\AgentRepository;
 use App\Repository\AgencyPointRepository;
 use App\Repository\BusRepository;
 use App\Repository\TripRepository;
+use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
+use App\Service\StatusMapperService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -26,7 +28,9 @@ class TripController extends AbstractController
         private BusRepository $busRepository,
         private AgencyPointRepository $agencyPointRepository,
         private EntityManagerInterface $em,
-        private NotificationBroadcastService $notificationBroadcaster, // 👈 NOUVEAU
+        private NotificationBroadcastService $notificationBroadcaster,
+        private AdminNotificationService $adminNotificationService,
+        private StatusMapperService $statusMapperService,
     ) {}
 
     public function index(Request $request, AgentRepository $agentRepository): JsonResponse
@@ -259,6 +263,11 @@ class TripController extends AbstractController
             return $this->json(['message' => 'Date/heure de départ invalide.'], Response::HTTP_BAD_REQUEST);
         }
 
+        $statusValue = $data['status'] ?? 'planifie';
+        if (is_array($statusValue)) {
+            $statusValue = $statusValue[0] ?? 'planifie';
+        }
+
         $trip = new Trip();
         $trip->setAgency($agency)
             ->setBus($bus)
@@ -285,11 +294,18 @@ class TripController extends AbstractController
             ->setArrivalTimeOfDay($arrivalTimeOfDay)
             ->setPrice((string)($data['price'] ?? '0'))
             ->setDriverName($data['driverName'] ?? null)
-            ->setStatus($data['status'][0] ?? 'planifie')
+            ->setStatus($this->statusMapperService->normalizeTripStatus((string)$statusValue))
             ->setSeatsReserved((int)($data['seatsReserved'] ?? 0));
 
         $this->em->persist($trip);
         $this->em->flush();
+
+        $this->adminNotificationService->notifyEvent(
+            'Nouveau voyage créé',
+            sprintf('Le voyage %s → %s a été créé par %s.', $trip->getDepartureCity(), $trip->getArrivalCity(), $agency->getName()),
+            'TRIP',
+            ['tripId' => $trip->getId(), 'agencyId' => $agency->getId()]
+        );
 
         return $this->json($this->normalizeTrip($trip), Response::HTTP_CREATED);
     }
@@ -310,7 +326,7 @@ class TripController extends AbstractController
         // l'horaire — les deux cas qui doivent alerter les passagers déjà
         // réservés. Sans ça, un client apprend l'annulation de son trajet en
         // se présentant à l'agence, ou pas du tout.
-        $previousStatus = $trip->getStatus();
+        $previousStatus = $this->statusMapperService->normalizeTripStatus($trip->getStatus());
         $previousDepartureTime = $trip->getDepartureTime();
 
         $data = json_decode($request->getContent(), true) ?? [];
@@ -440,7 +456,7 @@ class TripController extends AbstractController
             $trip->setDriverName($data['driverName']);
         }
         if (array_key_exists('status', $data)) {
-            $trip->setStatus($data['status']);
+            $trip->setStatus($this->statusMapperService->normalizeTripStatus((string)$data['status']));
         }
         if (array_key_exists('seatsReserved', $data)) {
             $trip->setSeatsReserved((int)$data['seatsReserved']);
@@ -451,6 +467,15 @@ class TripController extends AbstractController
 
         // 👈 NOUVEAU : voir notifyAffectedPassengersIfNeeded() plus bas.
         $this->notifyAffectedPassengersIfNeeded($trip, $previousStatus, $previousDepartureTime);
+
+        if ($previousStatus !== $trip->getStatus() || $previousDepartureTime?->getTimestamp() !== $trip->getDepartureTime()?->getTimestamp()) {
+            $this->adminNotificationService->notifyEvent(
+                'Voyage modifié',
+                sprintf('Le voyage %s → %s a été mis à jour.', $trip->getDepartureCity(), $trip->getArrivalCity()),
+                'TRIP',
+                ['tripId' => $trip->getId(), 'agencyId' => $trip->getAgency()?->getId()]
+            );
+        }
 
         return $this->json($this->normalizeTrip($trip));
     }
@@ -477,7 +502,8 @@ class TripController extends AbstractController
         string $previousStatus,
         ?\DateTimeInterface $previousDepartureTime,
     ): void {
-        $isNowCancelled = $trip->getStatus() === 'annule';
+        $normalizedCurrentStatus = $this->statusMapperService->normalizeTripStatus($trip->getStatus());
+        $isNowCancelled = $normalizedCurrentStatus === 'annule';
         $statusJustCancelled = $isNowCancelled && $previousStatus !== 'annule';
 
         $departureTimeChanged = $previousDepartureTime
@@ -594,20 +620,38 @@ class TripController extends AbstractController
         $this->em->remove($trip);
         $this->em->flush();
 
+        $this->adminNotificationService->notifyEvent(
+            'Voyage supprimé',
+            sprintf('Le voyage #%d a été supprimé.', $id),
+            'TRIP',
+            ['tripId' => $id]
+        );
+
         return $this->json(['success' => true, 'message' => 'Trajet supprimé.']);
     }
 
     private function parseDateTime(?string $dateTime): ?\DateTimeInterface
     {
-        if (!$dateTime) {
+        if ($dateTime === null || trim((string)$dateTime) === '') {
             return null;
         }
 
+        $value = trim((string)$dateTime);
+
+        if (preg_match('/^\d{1,2}:\d{2}$/', $value)) {
+            return new \DateTimeImmutable('today ' . $value);
+        }
+
         try {
-            return new \DateTime($dateTime);
+            return new \DateTimeImmutable($value);
         } catch (\Exception $exception) {
             return null;
         }
+    }
+
+    private function formatDateTime(?\DateTimeInterface $dateTime): ?string
+    {
+        return $dateTime ? $dateTime->format(\DateTimeInterface::ATOM) : null;
     }
 
     private function resolveAgencyPoints(array $pointIds, Agency $agency): array
@@ -723,15 +767,15 @@ class TripController extends AbstractController
                 'address' => $trip->getArrivalPoint()?->getAddress(),
                 'city' => $trip->getArrivalPoint()?->getCity(),
             ] : null,
-            'departureTime' => $trip->getDepartureTime()?->format(\DateTimeInterface::ATOM),
-            'estimatedArrivalTime' => $trip->getEstimatedArrivalTime()?->format(\DateTimeInterface::ATOM),
+            'departureTime' => $this->formatDateTime($trip->getDepartureTime()),
+            'estimatedArrivalTime' => $this->formatDateTime($trip->getEstimatedArrivalTime()),
             'tripDate' => $trip->getTripDate()?->format('Y-m-d'),
             'departureTimeOfDay' => $trip->getDepartureTimeOfDay()?->format('H:i'),
             'arrivalTimeOfDay' => $trip->getArrivalTimeOfDay()?->format('H:i'),
             'departureDate' => $trip->getTripDate()?->format('Y-m-d') ?? $trip->getDepartureTime()?->format('Y-m-d'),
             'price' => $trip->getPrice(),
             'driverName' => $trip->getDriverName(),
-            'status' => $trip->getStatus(),
+            'status' => $this->statusMapperService->normalizeTripStatus($trip->getStatus()),
             'seatsReserved' => $trip->getSeatsReserved(),
             'category' => $category,
             'maxSeats' => $trip->getBus()?->getCapacity() ?? 0,
@@ -747,8 +791,8 @@ class TripController extends AbstractController
             ],
             'busType' => $trip->getBus()?->getCategory() ?? null,
             'boardingPoint' => $boardingPoints[0]['name'] ?? null,
-            'createdAt' => $trip->getCreatedAt()?->format(\DateTimeInterface::ATOM),
-            'updatedAt' => $trip->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'createdAt' => $this->formatDateTime($trip->getCreatedAt()),
+            'updatedAt' => $this->formatDateTime($trip->getCreatedAt()),
         ];
     }
 }

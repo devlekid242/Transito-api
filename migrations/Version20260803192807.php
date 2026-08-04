@@ -10,7 +10,7 @@ use Doctrine\Migrations\AbstractMigration;
 /**
  * Auto-generated Migration: Please modify to your needs!
  */
-final class Version20260803145507 extends AbstractMigration
+final class Version20260803192807 extends AbstractMigration
 {
     public function getDescription(): string
     {
@@ -41,6 +41,7 @@ final class Version20260803145507 extends AbstractMigration
         $this->addSql('CREATE TABLE `reviews` (id INT AUTO_INCREMENT NOT NULL, rating INT NOT NULL, comment LONGTEXT DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, user_id INT NOT NULL, agency_id INT NOT NULL, INDEX IDX_6970EB0FA76ED395 (user_id), INDEX IDX_6970EB0FCDEADB2A (agency_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `support_responses` (id INT AUTO_INCREMENT NOT NULL, message LONGTEXT NOT NULL, created_at VARCHAR(255) NOT NULL, ticket_id INT NOT NULL, agent_id INT DEFAULT NULL, INDEX IDX_878D0422700047D2 (ticket_id), INDEX IDX_878D04223414710B (agent_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `support_tickets` (id INT AUTO_INCREMENT NOT NULL, subject VARCHAR(255) NOT NULL, message LONGTEXT NOT NULL, category VARCHAR(50) NOT NULL, status VARCHAR(30) DEFAULT \'open\' NOT NULL, priority VARCHAR(20) DEFAULT \'medium\' NOT NULL, created_at VARCHAR(255) NOT NULL, user_id INT NOT NULL, INDEX IDX_E9739508A76ED395 (user_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
+        $this->addSql('CREATE TABLE system_settings (id INT AUTO_INCREMENT NOT NULL, setting_key VARCHAR(100) NOT NULL, data JSON NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, UNIQUE INDEX UNIQ_8CAF11475FA1E697 (setting_key), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `tickets` (id INT AUTO_INCREMENT NOT NULL, passenger_name VARCHAR(100) NOT NULL, passenger_phone VARCHAR(20) NOT NULL, passenger_cni VARCHAR(50) NOT NULL, seat_number INT NOT NULL, qr_code_token VARCHAR(255) NOT NULL, status VARCHAR(30) DEFAULT \'en_attente\' NOT NULL, validated_at DATETIME DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, reservation_id INT NOT NULL, validated_by_agent_id INT DEFAULT NULL, UNIQUE INDEX UNIQ_54469DF41BC9050B (qr_code_token), INDEX IDX_54469DF4B83297E7 (reservation_id), INDEX IDX_54469DF42C1CCDB2 (validated_by_agent_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `trips` (id INT AUTO_INCREMENT NOT NULL, departure_city VARCHAR(100) DEFAULT NULL, arrival_city VARCHAR(100) DEFAULT NULL, boarding_points JSON NOT NULL, deboarding_points JSON NOT NULL, departure_time DATETIME NOT NULL, estimated_arrival_time DATETIME DEFAULT NULL, trip_date DATE DEFAULT NULL, departure_time_of_day TIME DEFAULT NULL, arrival_time_of_day TIME DEFAULT NULL, price NUMERIC(10, 2) NOT NULL, driver_name VARCHAR(100) DEFAULT NULL, status VARCHAR(30) DEFAULT \'planifie\' NOT NULL, seats_reserved INT DEFAULT 0 NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, agency_id INT NOT NULL, bus_id INT NOT NULL, departure_point_id INT NOT NULL, arrival_point_id INT NOT NULL, INDEX IDX_AA7370DACDEADB2A (agency_id), INDEX IDX_AA7370DA2546731D (bus_id), INDEX IDX_AA7370DA7C546AFF (departure_point_id), INDEX IDX_AA7370DACE388D5E (arrival_point_id), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
         $this->addSql('CREATE TABLE `users` (id INT AUTO_INCREMENT NOT NULL, full_name VARCHAR(100) NOT NULL, email VARCHAR(100) DEFAULT NULL, phone VARCHAR(20) NOT NULL, ville_residence VARCHAR(100) NOT NULL, quartier VARCHAR(100) DEFAULT NULL, emergency_contact_name VARCHAR(100) DEFAULT NULL, emergency_contact_phone VARCHAR(20) DEFAULT NULL, roles JSON NOT NULL, password_hash VARCHAR(255) NOT NULL, pref_notifications SMALLINT DEFAULT 1 NOT NULL, pref_language VARCHAR(10) DEFAULT \'fr\' NOT NULL, pref_dark_mode SMALLINT DEFAULT 0 NOT NULL, status VARCHAR(20) DEFAULT \'active\' NOT NULL, email_verified TINYINT DEFAULT 0 NOT NULL, phone_verified TINYINT DEFAULT 0 NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, password_reset_code VARCHAR(10) DEFAULT NULL, password_reset_expires_at DATETIME DEFAULT NULL, last_login_at DATETIME DEFAULT NULL, profile_photo_url VARCHAR(500) DEFAULT NULL, UNIQUE INDEX UNIQ_IDENTIFIER_PHONE_NUMBER (phone), UNIQUE INDEX UNIQ_IDENTIFIER_EMAIL (email), PRIMARY KEY (id)) DEFAULT CHARACTER SET utf8mb4');
@@ -153,6 +154,7 @@ final class Version20260803145507 extends AbstractMigration
         $this->addSql('DROP TABLE `reviews`');
         $this->addSql('DROP TABLE `support_responses`');
         $this->addSql('DROP TABLE `support_tickets`');
+        $this->addSql('DROP TABLE system_settings');
         $this->addSql('DROP TABLE `tickets`');
         $this->addSql('DROP TABLE `trips`');
         $this->addSql('DROP TABLE `users`');

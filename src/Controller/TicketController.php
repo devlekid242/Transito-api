@@ -7,6 +7,7 @@ use App\Entity\Notification;
 use App\Entity\Ticket;
 use Doctrine\ORM\EntityManagerInterface;
 use App\Service\NotificationBroadcastService;
+use App\Service\StatusMapperService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -17,6 +18,7 @@ class TicketController extends AbstractController
     public function __construct(
         private EntityManagerInterface $em,
         private NotificationBroadcastService $notificationBroadcaster,
+        private StatusMapperService $statusMapperService,
     ) {}
 
     /**
@@ -187,7 +189,7 @@ class TicketController extends AbstractController
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
             ->andWhere('t.status = :status')
-            ->setParameter('status', 'en_attente');
+            ->setParameter('status', $this->statusMapperService->normalizeTicketStatus('pending'));
 
         if ($tripId) {
             $qb->andWhere('tr.id = :tripId')->setParameter('tripId', $tripId);
@@ -450,12 +452,13 @@ class TicketController extends AbstractController
         $departureTime = $trip?->getDepartureTime();
         $arrivalTime = $trip?->getEstimatedArrivalTime();
         $price = $reservation?->getTotalAmount() ?? 0;
+        $normalizedStatus = $this->statusMapperService->normalizeTicketStatus($ticket->getStatus());
         $statusMap = [
             'en_attente' => 'Actif',
             'embarque' => 'Utilisé',
             'annule' => 'Annulé',
         ];
-        $isCancelled = $ticket->getStatus() === 'annule';
+        $isCancelled = $normalizedStatus === 'annule';
         $departureCity = $trip?->getDepartureCity() ?? $trip?->getDeparturePoint()?->getCity() ?? '';
         $arrivalCity = $trip?->getArrivalCity() ?? $trip?->getArrivalPoint()?->getCity() ?? '';
         $validatedByAgent = $ticket->getValidatedByAgent();
@@ -481,7 +484,8 @@ class TicketController extends AbstractController
             // Un billet annulé ne doit plus jamais exposer de QR code exploitable.
             'qrCode' => $isCancelled ? null : $ticket->getQrCodeToken(),
             'price' => $price,
-            'status' => $statusMap[$ticket->getStatus()] ?? 'Expiré',
+            'status' => $statusMap[$normalizedStatus] ?? 'Expiré',
+            'statusCode' => $normalizedStatus,
             'isCancelled' => $isCancelled,
             'canDisplayDetails' => !$isCancelled,
             'validatedByAgentId' => $validatedByAgent?->getId(),

@@ -8,6 +8,7 @@ use App\Entity\Admin;
 use App\Repository\UserRepository;
 use App\Repository\AgentRepository;
 use App\Repository\AdminRepository;
+use App\Service\AdminNotificationService;
 use App\Service\RefreshTokenService;
 use App\Service\TwilioService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -31,7 +32,8 @@ class AuthController extends AbstractController
         UserPasswordHasherInterface $passwordHasher,
         JWTTokenManagerInterface $jwtManager,
         RefreshTokenService $refreshTokenService,
-        EntityManagerInterface $em
+        EntityManagerInterface $em,
+        AdminNotificationService $adminNotificationService
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
         if (!is_array($payload)) {
@@ -102,6 +104,20 @@ class AuthController extends AbstractController
                 'department' => $admin->getDepartment(),
             ];
         }
+
+        $accountType = 'client';
+        if ($admin) {
+            $accountType = 'administrateur';
+        } elseif ($agent) {
+            $accountType = 'agent';
+        }
+
+        $adminNotificationService->notifyEvent(
+            'Connexion utilisateur',
+            sprintf('%s (%s) s\'est connecté à la plateforme.', $user->getFullName() ?? $user->getEmail() ?? 'Un utilisateur', $accountType),
+            'INFO',
+            ['userId' => $user->getId(), 'type' => 'user_login', 'accountType' => $accountType]
+        );
 
         return $this->json([
             'token' => $token,

@@ -10,6 +10,7 @@ use App\Entity\Reservation;
 use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Entity\User;
+use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
@@ -37,7 +38,11 @@ class BookingController extends AbstractController
     /** Nombre maximum de passagers autorisés sur une seule réservation. */
     private const MAX_PASSENGERS_PER_BOOKING = 10;
 
-    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster) {}
+    public function __construct(
+        private EntityManagerInterface $em,
+        private NotificationBroadcastService $notificationBroadcaster,
+        private AdminNotificationService $adminNotificationService,
+    ) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
     public function create(Request $request, ReservationRepository $reservationRepository): JsonResponse
@@ -223,6 +228,13 @@ class BookingController extends AbstractController
         if ($agencyNotification) {
             $this->notificationBroadcaster->broadcast($agencyNotification);
         }
+
+        $this->adminNotificationService->notifyEvent(
+            'Nouvelle réservation',
+            sprintf('Une réservation a été créée pour %s → %s.', $trip->getDepartureCity(), $trip->getArrivalCity()),
+            'BOOKING',
+            ['reservationId' => $reservation->getId(), 'tripId' => $trip->getId(), 'userId' => $user->getId()]
+        );
 
         // Complète le numéro de billet maintenant que les tickets ont un id.
         $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
@@ -646,6 +658,13 @@ class BookingController extends AbstractController
         if ($agencyNotification) {
             $this->notificationBroadcaster->broadcast($agencyNotification);
         }
+
+        $this->adminNotificationService->notifyEvent(
+            'Réservation annulée',
+            sprintf('La réservation #%d a été annulée.', $reservation->getId()),
+            'BOOKING',
+            ['reservationId' => $reservation->getId(), 'tripId' => $trip->getId(), 'userId' => $reservation->getUser()?->getId()]
+        );
 
         return new JsonResponse([
             'ok' => true,

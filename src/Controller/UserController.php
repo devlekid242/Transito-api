@@ -8,6 +8,7 @@ use App\Entity\Agency;
 use App\Entity\Notification;
 use App\Repository\AgencyRepository;
 use App\Repository\AgentRepository;
+use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -22,6 +23,7 @@ class UserController extends AbstractController
     public function __construct(
         private AgentRepository $agentRepository,
         private NotificationBroadcastService $notificationBroadcaster,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
 

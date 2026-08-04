@@ -21,8 +21,8 @@ class SystemSettingRepository extends ServiceEntityRepository
             $setting = new SystemSetting();
             $setting->setKey('system');
             $setting->setData([]);
-            $this->_em->persist($setting);
-            $this->_em->flush();
+            $this->getEntityManager()->persist($setting);
+            $this->getEntityManager()->flush();
         }
 
         return $setting;

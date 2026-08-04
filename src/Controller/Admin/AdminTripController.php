@@ -11,6 +11,7 @@ use App\Repository\ReservationRepository;
 use App\Repository\TicketRepository;
 use App\Repository\TripRepository;
 use App\Repository\UserRepository;
+use App\Service\StatusMapperService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -34,7 +35,26 @@ class AdminTripController extends AbstractController
         private TicketRepository $ticketRepository,
         private AgencyRepository $agencyRepository,
         private UserRepository $userRepository,
+        private StatusMapperService $statusMapperService,
     ) {}
+
+    private function resolveBackendStatusesForFilter(string $status): array
+    {
+        $map = [
+            'SCHEDULED' => ['planifie'],
+            'IN_PROGRESS' => ['embarquement', 'en_route'],
+            'COMPLETED' => ['termine'],
+            'CANCELLED' => ['annule'],
+            'DELAYED' => ['annule'],
+            'planifie' => ['planifie'],
+            'embarquement' => ['embarquement'],
+            'en_route' => ['en_route'],
+            'termine' => ['termine'],
+            'annule' => ['annule'],
+        ];
+
+        return $map[$status] ?? [];
+    }
 
     /**
      * Get all trips with optional filtering and pagination.
@@ -67,19 +87,12 @@ class AdminTripController extends AbstractController
 
         // Apply filters
         if ($status && $status !== 'ALL') {
-            $statusMap = [
-                'SCHEDULED' => 'planifie',
-                'IN_PROGRESS' => ['embarquement', 'en_route'],
-                'COMPLETED' => 'termine',
-                'CANCELLED' => 'annule',
-                'DELAYED' => 'annule' // Note: backend doesn't have explicit DELAYED status
-            ];
-            
-            if (isset($statusMap[$status])) {
-                if (is_array($statusMap[$status])) {
-                    $qb->andWhere('t.status IN (:status)')->setParameter('status', $statusMap[$status]);
+            $backendStatuses = $this->resolveBackendStatusesForFilter($status);
+            if (count($backendStatuses) > 0) {
+                if (count($backendStatuses) > 1) {
+                    $qb->andWhere('t.status IN (:status)')->setParameter('status', $backendStatuses);
                 } else {
-                    $qb->andWhere('t.status = :status')->setParameter('status', $statusMap[$status]);
+                    $qb->andWhere('t.status = :status')->setParameter('status', $backendStatuses[0]);
                 }
             }
         }
@@ -119,19 +132,12 @@ class AdminTripController extends AbstractController
 
         // Apply same filters as main query
         if ($status && $status !== 'ALL') {
-            $statusMap = [
-                'SCHEDULED' => 'planifie',
-                'IN_PROGRESS' => ['embarquement', 'en_route'],
-                'COMPLETED' => 'termine',
-                'CANCELLED' => 'annule',
-                'DELAYED' => 'annule'
-            ];
-            
-            if (isset($statusMap[$status])) {
-                if (is_array($statusMap[$status])) {
-                    $countQb->andWhere('t.status IN (:status)')->setParameter('status', $statusMap[$status]);
+            $backendStatuses = $this->resolveBackendStatusesForFilter($status);
+            if (count($backendStatuses) > 0) {
+                if (count($backendStatuses) > 1) {
+                    $countQb->andWhere('t.status IN (:status)')->setParameter('status', $backendStatuses);
                 } else {
-                    $countQb->andWhere('t.status = :status')->setParameter('status', $statusMap[$status]);
+                    $countQb->andWhere('t.status = :status')->setParameter('status', $backendStatuses[0]);
                 }
             }
         }
@@ -322,26 +328,18 @@ class AdminTripController extends AbstractController
         $agency = $trip->getAgency();
         $bus = $trip->getBus();
         
-        $backendStatusMap = [
-            'termine' => 'COMPLETED',
-            'planifie' => 'SCHEDULED',
-            'embarquement' => 'IN_PROGRESS',
-            'en_route' => 'IN_PROGRESS',
-            'annule' => 'CANCELLED'
-        ];
-        
-        $status = $backendStatusMap[$trip->getStatus()] ?? $trip->getStatus();
+        $status = $this->statusMapperService->mapTripStatus($trip->getStatus());
         
         $capacity = $bus ? $bus->getCapacity() : 0;
         $bookedSeats = $trip->getSeatsReserved();
         $fillRate = $capacity > 0 ? round(($bookedSeats * 100) / $capacity, 2) : 0;
         
         $departureTime = $trip->getDepartureTime();
-        $departureDate = $departureTime ? $departureTime->format('Y-m-d') : null;
-        $departureHour = $departureTime ? $departureTime->format('H:i') : null;
+        $departureDate = $trip->getTripDate()?->format('Y-m-d') ?? $departureTime?->format('Y-m-d');
+        $departureHour = $trip->getDepartureTimeOfDay()?->format('H:i') ?? $departureTime?->format('H:i');
         
         $arrivalTime = $trip->getEstimatedArrivalTime();
-        $arrivalHour = $arrivalTime ? $arrivalTime->format('H:i') : null;
+        $arrivalHour = $trip->getArrivalTimeOfDay()?->format('H:i') ?? $arrivalTime?->format('H:i');
         
         $price = $trip->getPrice() ? (float) $trip->getPrice() : 0;
         $reservationCount = (int) ($tripData['reservationCount'] ?? 0);
@@ -354,8 +352,11 @@ class AdminTripController extends AbstractController
             'agency' => $agency ? $agency->getName() : 'N/A',
             'agencyId' => $agency ? $agency->getId() : null,
             'date' => $departureDate,
+            'tripDate' => $departureDate,
             'departure' => $departureHour,
+            'departureTimeOfDay' => $departureHour,
             'arrival' => $arrivalHour,
+            'arrivalTimeOfDay' => $arrivalHour,
             'busType' => $bus ? $bus->getModel() : 'N/A',
             'busPlate' => $bus ? $bus->getRegistrationNumber() : 'N/A',
             'driver' => $trip->getDriverName() ?? 'N/A',
@@ -375,22 +376,14 @@ class AdminTripController extends AbstractController
         $agency = $trip->getAgency();
         $bus = $trip->getBus();
         
-        $backendStatusMap = [
-            'termine' => 'COMPLETED',
-            'planifie' => 'SCHEDULED',
-            'embarquement' => 'IN_PROGRESS',
-            'en_route' => 'IN_PROGRESS',
-            'annule' => 'CANCELLED'
-        ];
-        
-        $status = $backendStatusMap[$trip->getStatus()] ?? $trip->getStatus();
+        $status = $this->statusMapperService->mapTripStatus($trip->getStatus());
         
         $departureTime = $trip->getDepartureTime();
-        $departureDate = $departureTime ? $departureTime->format('Y-m-d') : null;
-        $departureHour = $departureTime ? $departureTime->format('H:i') : null;
+        $departureDate = $trip->getTripDate()?->format('Y-m-d') ?? $departureTime?->format('Y-m-d');
+        $departureHour = $trip->getDepartureTimeOfDay()?->format('H:i') ?? $departureTime?->format('H:i');
         
         $arrivalTime = $trip->getEstimatedArrivalTime();
-        $arrivalHour = $arrivalTime ? $arrivalTime->format('H:i') : null;
+        $arrivalHour = $trip->getArrivalTimeOfDay()?->format('H:i') ?? $arrivalTime?->format('H:i');
         
         $capacity = $bus ? $bus->getCapacity() : 0;
         $bookedSeats = $trip->getSeatsReserved();
@@ -424,8 +417,11 @@ class AdminTripController extends AbstractController
                 'city' => $agency->getAddress() ?? '',
             ] : null,
             'date' => $departureDate,
+            'tripDate' => $departureDate,
             'departure' => $departureHour,
+            'departureTimeOfDay' => $departureHour,
             'arrival' => $arrivalHour,
+            'arrivalTimeOfDay' => $arrivalHour,
             'duration' => $duration,
             'busType' => $bus ? $bus->getModel() : 'N/A',
             'busPlate' => $bus ? $bus->getRegistrationNumber() : 'N/A',
