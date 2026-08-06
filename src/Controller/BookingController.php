@@ -12,6 +12,7 @@ use App\Entity\Trip;
 use App\Entity\User;
 use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
+use App\Service\WalletService;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -30,19 +31,14 @@ class BookingController extends AbstractController
     private const CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE = 24;
 
     /**
-     * Frais de plateforme standardisés, appliqués à chaque réservation.
-     * Doit rester alignée avec la valeur affichée côté front (booking-form.page.ts).
+     * Nombre maximum de passagers autorisés sur une seule réservation.
      */
-    private const SERVICE_FEE = 500;
 
     /** Nombre maximum de passagers autorisés sur une seule réservation. */
     private const MAX_PASSENGERS_PER_BOOKING = 10;
 
-    public function __construct(
-        private EntityManagerInterface $em,
-        private NotificationBroadcastService $notificationBroadcaster,
-        private AdminNotificationService $adminNotificationService,
-    ) {}
+    
+    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster, private WalletService $walletService) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
     public function create(Request $request, ReservationRepository $reservationRepository): JsonResponse
@@ -127,7 +123,7 @@ class BookingController extends AbstractController
             // --- Prix recalculé côté serveur : la seule source de vérité ---
             $pricePerSeat = (float) $trip->getPrice();
             $computedSubtotal = $pricePerSeat * $seatsRequested;
-            $computedTotal = $computedSubtotal + self::SERVICE_FEE;
+            $computedTotal = $computedSubtotal + WalletService::PLATFORM_FEE;
 
             $reservation = new Reservation();
             $reservation->setUser($user);
@@ -558,6 +554,8 @@ class BookingController extends AbstractController
             $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
             foreach ($tickets as $ticket) {
                 $ticket->setStatus('annule');
+                // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
+                $ticket->setQrCodeToken(null);
                 $this->em->persist($ticket);
             }
 
@@ -574,7 +572,7 @@ class BookingController extends AbstractController
             $refundAmount = null;
 
             if ($wasPaid) {
-                $refundAmount = (float)$reservation->getTotalAmount() - self::SERVICE_FEE;
+                $refundAmount = (float)$reservation->getTotalAmount() - WalletService::PLATFORM_FEE;
                 $refundLog = new PaymentLog();
                 $refundLog->setReservation($reservation);
                 $refundLog->setOperator($reservation->getPaymentMethod() ?? 'N/A');

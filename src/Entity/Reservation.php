@@ -82,7 +82,7 @@ class Reservation
     private ?string $paymentMethod = null;
 
     #[ORM\Column(name: 'payment_status', length: 30, options: ['default' => 'en_attente'])]
-    #[Assert\Choice(choices: ['en_attente', 'paye', 'echoue', 'rembourse'], message: "Statut de paiement invalide.")]
+    #[Assert\Choice(choices: ['en_attente', 'paye', 'echoue', 'rembourse', 'annule'], message: "Statut de paiement invalide.")]
     #[Groups(['reservation:read', 'reservation:write'])]
     private string $paymentStatus = 'en_attente';
 

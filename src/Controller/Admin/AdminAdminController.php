@@ -303,6 +303,7 @@ class AdminAdminController extends AbstractController
         return [
             'id' => $admin->getId(),
             'userId' => $user?->getId(),
+            'profilePhotoUrl' => $user?->getProfilePhotoUrl(),
             'fullName' => $user?->getFullName() ?? '',
             'email' => $user?->getEmail(),
             'phoneNumber' => $user?->getPhoneNumber() ?? '',

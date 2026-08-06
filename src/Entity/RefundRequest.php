@@ -6,6 +6,7 @@ use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use App\Repository\RefundRequestRepository;
+use App\Service\WalletService;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
@@ -255,9 +256,9 @@ class RefundRequest
         }
 
         // The net amount is the reservation total minus platform fee
-        // For simplicity, we use the platform fee constant from WalletService
+        // Using the centralized constant from WalletService for consistency
         $grossAmount = (float) $reservation->getTotalAmount();
-        $platformFee = 500.00; // Same as WalletService::PLATFORM_FEE
+        $platformFee = WalletService::PLATFORM_FEE;
         
         return max(0.0, round($grossAmount - $platformFee, 2));
     }

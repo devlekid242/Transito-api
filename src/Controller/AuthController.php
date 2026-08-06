@@ -59,6 +59,11 @@ class AuthController extends AbstractController
             return $this->json(['message' => 'Identifiants invalides.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        // check if user is not suspended
+        if ($user->getStatus() !== 'active') {
+            return $this->json(['message' => 'Compte utilisateur suspendu ou inactif.'], Response::HTTP_FORBIDDEN);
+        }
+
         $agent = $agentRepository->findOneBy(['user' => $user]);
         $admin = $adminRepository->findByUser($user);
 

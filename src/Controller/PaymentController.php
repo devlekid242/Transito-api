@@ -5,6 +5,7 @@ namespace App\Controller;
 use App\Entity\Notification;
 use App\Entity\PaymentLog;
 use App\Entity\Reservation;
+use App\Entity\Ticket;
 use App\Entity\User;
 use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
@@ -104,9 +105,13 @@ class PaymentController extends AbstractController
         $tx = $data['transaction_id'] ?? $data['transactionId'] ?? null;
         if (!$tx) return new JsonResponse(['error' => 'transaction_id is required'], 400);
 
-        $repo = $this->em->getRepository(PaymentLog::class);
-        $log = $repo->findOneBy(['reference' => $tx]);
-        if (!$log) return new JsonResponse(['error' => 'Transaction not found'], 404);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+
+        try {
+            $repo = $this->em->getRepository(PaymentLog::class);
+            $log = $repo->findOneBy(['reference' => $tx]);
+            if (!$log) return new JsonResponse(['error' => 'Transaction not found'], 404);
 
         // 👈 NOUVEAU : une transaction déjà remboursée/annulée ne doit jamais
         // pouvoir être "re-confirmée" — cela recréditerait une réservation
@@ -135,6 +140,30 @@ class PaymentController extends AbstractController
         // update reservation payment status
         $reservation = $log->getReservation();
         if ($reservation) {
+            // 👈 SÉCURITÉ : ne jamais confirmer un paiement pour une réservation déjà annulée ou remboursée.
+            // Cela pourrait créditer l'agence alors qu'un remboursement est déjà en attente ou traité.
+            if (in_array($reservation->getPaymentStatus(), ['annule', 'rembourse'], true)) {
+                return new JsonResponse([
+                    'error' => "Impossible de confirmer ce paiement : la réservation a déjà été annulée ou remboursée.",
+                ], 409);
+            }
+
+            // 👈 SÉCURITÉ : ne jamais confirmer un paiement si un billet a déjà été validé/embarqué.
+            // Cela pourrait créditer l'agence pour un voyage déjà effectué.
+            $existingTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+            $hasBoardedTicket = false;
+            foreach ($existingTickets as $ticket) {
+                if ($ticket->getStatus() === 'embarque') {
+                    $hasBoardedTicket = true;
+                    break;
+                }
+            }
+            if ($hasBoardedTicket) {
+                return new JsonResponse([
+                    'error' => "Impossible de confirmer ce paiement : au moins un billet de cette réservation a déjà été validé à l'embarquement.",
+                ], 409);
+            }
+
             $reservation->setPaymentStatus('paye');
             $this->em->persist($reservation);
 
@@ -157,6 +186,7 @@ class PaymentController extends AbstractController
 
         $this->em->persist($log);
         $this->em->flush();
+        $connection->commit();
 
         if (isset($notification)) {
             $this->notificationBroadcaster->broadcast($notification);
@@ -175,6 +205,10 @@ class PaymentController extends AbstractController
             'status' => $log->getStatus(),
             'message' => 'Payment confirmed'
         ], 200);
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
+        }
     }
 
     public function history(): JsonResponse
@@ -304,8 +338,12 @@ class PaymentController extends AbstractController
     #[IsGranted('ROLE_ADMIN')]
     public function refund(int $id, Request $request): JsonResponse
     {
-        $log = $this->em->getRepository(PaymentLog::class)->find($id);
-        if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+
+        try {
+            $log = $this->em->getRepository(PaymentLog::class)->find($id);
+            if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
 
         // 👈 NOUVEAU : ne rembourser qu'une transaction réellement payée
         // (SUCCESS) ou explicitement en attente de remboursement
@@ -331,6 +369,22 @@ class PaymentController extends AbstractController
         // mark reservation as refunded
         $reservation = $log->getReservation();
         if ($reservation) {
+            // 👈 SÉCURITÉ : ne jamais rembourser une réservation dont un billet a déjà été validé/embarqué.
+            // Un passager qui est monté dans le bus ne peut pas être remboursé.
+            $existingTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+            $hasBoardedTicket = false;
+            foreach ($existingTickets as $ticket) {
+                if ($ticket->getStatus() === 'embarque') {
+                    $hasBoardedTicket = true;
+                    break;
+                }
+            }
+            if ($hasBoardedTicket) {
+                return new JsonResponse([
+                    'error' => "Impossible de rembourser : au moins un billet de cette réservation a déjà été validé à l'embarquement.",
+                ], 409);
+            }
+
             $reservation->setPaymentStatus('rembourse');
             $this->em->persist($reservation);
 
@@ -351,12 +405,17 @@ class PaymentController extends AbstractController
 
         $this->em->persist($log);
         $this->em->flush();
+        $connection->commit();
 
         if (isset($notification)) {
             $this->notificationBroadcaster->broadcast($notification);
         }
 
         return new JsonResponse(['success' => true], 200);
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
+        }
     }
 
 

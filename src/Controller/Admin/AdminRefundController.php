@@ -693,6 +693,20 @@ class AdminRefundController extends AbstractController
             throw new \RuntimeException('Réservation introuvable pour cette demande de remboursement.');
         }
 
+        // 👈 SÉCURITÉ : ne jamais rembourser une réservation dont un billet a déjà été validé/embarqué.
+        // Un passager qui est monté dans le bus ne peut pas être remboursé.
+        $existingTickets = $this->em->getRepository(\App\Entity\Ticket::class)->findBy(['reservation' => $reservation]);
+        $hasBoardedTicket = false;
+        foreach ($existingTickets as $ticket) {
+            if ($ticket->getStatus() === 'embarque') {
+                $hasBoardedTicket = true;
+                break;
+            }
+        }
+        if ($hasBoardedTicket) {
+            throw new \RuntimeException('Impossible de rembourser : au moins un billet de cette réservation a déjà été validé à l\'embarquement.');
+        }
+
         $wallet = $this->getOrCreateWallet($agency);
         $netAmount = $this->calculateNetRefundAmount($refundRequest);
 
@@ -768,7 +782,7 @@ class AdminRefundController extends AbstractController
 
         // Garder la réservation synchronisée si elle ne l'était pas déjà
         // (cas d'un remboursement créé manuellement sans passer par cancel())
-        if ($reservation->getPaymentStatus() !== 'rembourser') {
+        if ($reservation->getPaymentStatus() !== 'rembourse') {
             $reservation->setPaymentStatus('rembourse');
             $this->em->persist($reservation);
         }

@@ -88,10 +88,18 @@ class Admin
     #[Groups(['admin:read'])]
     private ?\DateTimeInterface $updatedAt = null;
 
+    /**
+     * Activity logs for this admin
+     */
+    #[ORM\OneToMany(mappedBy: 'admin', targetEntity: AdminActivityLog::class, cascade: ['persist'], orphanRemoval: true)]
+    #[ORM\OrderBy(['createdAt' => 'DESC'])]
+    private \Doctrine\Common\Collections\Collection $activityLogs;
+
     public function __construct()
     {
         $this->createdAt = new \DateTime();
         $this->updatedAt = new \DateTime();
+        $this->activityLogs = new \Doctrine\Common\Collections\ArrayCollection();
     }
 
     public function getId(): ?int
@@ -225,6 +233,36 @@ class Admin
     public function setUpdatedAt(\DateTimeInterface $updatedAt): static
     {
         $this->updatedAt = $updatedAt;
+        return $this;
+    }
+
+    /**
+     * @return \Doctrine\Common\Collections\Collection<int, AdminActivityLog>
+     */
+    public function getActivityLogs(): \Doctrine\Common\Collections\Collection
+    {
+        return $this->activityLogs;
+    }
+
+    public function addActivityLog(AdminActivityLog $activityLog): static
+    {
+        if (!$this->activityLogs->contains($activityLog)) {
+            $this->activityLogs->add($activityLog);
+            $activityLog->setAdmin($this);
+        }
+
+        return $this;
+    }
+
+    public function removeActivityLog(AdminActivityLog $activityLog): static
+    {
+        if ($this->activityLogs->removeElement($activityLog)) {
+            // set the owning side to null (unless already changed)
+            if ($activityLog->getAdmin() === $this) {
+                $activityLog->setAdmin(null);
+            }
+        }
+
         return $this;
     }
 

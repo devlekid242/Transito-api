@@ -289,7 +289,7 @@ class ReservationRepository extends ServiceEntityRepository
             ->where('r.user = :user')
             ->andWhere('r.paymentStatus IN (:statuses)')
             ->setParameter('user', $user)
-            ->setParameter('statuses', ['annule', 'echoue', 'annulée', 'échouée', 'cancelled', 'failed', 'no_show'])
+            ->setParameter('statuses', ['annule', 'echoue', 'annulée', 'échouée', 'cancelled', 'failed', 'no_show', 'Remboursé', 'Refunded','REFUNDED'])
             ->getQuery()
             ->getSingleScalarResult();
     }

@@ -17,6 +17,8 @@ use App\Repository\PaymentLogRepository;
 use App\Repository\WalletTransactionRepository;
 use App\Repository\RefundRequestRepository;
 use App\Repository\TicketRepository;
+use App\Repository\UserRepository;
+use App\Service\WalletService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -43,6 +45,7 @@ class AdminFinancialController extends AbstractController
         private PaymentLogRepository $paymentLogRepository,
         private RefundRequestRepository $refundRequestRepository,
         private TicketRepository $ticketRepository,
+        private UserRepository $userRepository,
     ) {}
 
     /**
@@ -126,7 +129,216 @@ class AdminFinancialController extends AbstractController
     }
 
     /**
-     * Get transaction history across all types (payments, refunds, withdrawals, commissions, etc.)
+     * Get comprehensive reports data for the admin reports page.
+     */
+    #[Route('/reports/comprehensive', name: 'api_admin_financial_reports_comprehensive', methods: ['GET'])]
+    public function getComprehensiveReports(Request $request): JsonResponse
+    {
+        $startDate = $request->query->get('startDate') ? new \DateTime($request->query->get('startDate')) : new \DateTime('today');
+        $endDate = $request->query->get('endDate') ? new \DateTime($request->query->get('endDate')) : new \DateTime('now');
+
+        if ($endDate < $startDate) {
+            $temp = $startDate;
+            $startDate = $endDate;
+            $endDate = $temp;
+        }
+
+        $platformRevenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
+        $platformFees = $this->getPlatformFeesBreakdown($startDate, $endDate);
+        $platformNetEarnings = $this->getPlatformNetEarnings($startDate, $endDate);
+        $paymentDistribution = $this->getPlatformPaymentDistribution($startDate, $endDate);
+        $revenueChartData = $this->getRevenueTimeSeries($startDate, $endDate, 'daily');
+        $refundsTrend = $this->getPlatformRefundsTrend($startDate, $endDate, 'daily');
+
+        $financialSummary = [
+            'totalBalance' => (float) $this->walletRepository->getTotalBalance(),
+            'availableBalance' => (float) $this->walletRepository->getTotalAvailableBalance(),
+            'reservedBalance' => (float) $this->walletRepository->getTotalReservedBalance(),
+            'pendingWithdrawals' => (float) $this->withdrawalRepository->getPendingWithdrawalsAmount(),
+            'pendingRefunds' => (float) $this->paymentLogRepository->getPendingRefundsAmount(),
+            'commissionEarnings' => $platformFees['platformFees'] ?? 0.0,
+        ];
+
+        $agencyMetrics = $this->getRevenueByAgency($startDate, $endDate);
+        $agencyPerformance = [];
+        foreach ($agencyMetrics as $agencyRow) {
+            $agencyPerformance[] = [
+                'agencyId' => '',
+                'agencyName' => $agencyRow['agency'] ?? '',
+                'revenue' => (float) ($agencyRow['revenue'] ?? 0),
+                'reservations' => 0,
+                'fillRate' => 0.0,
+                'cancellationRate' => 0.0,
+                'rating' => 4.5,
+                'status' => 'ACTIVE',
+            ];
+        }
+
+        $routes = $this->reservationRepository->findTopRoutes(5);
+        $routePerformance = [];
+        foreach ($routes as $routeRow) {
+            $bookings = (int) ($routeRow['reservationCount'] ?? 0);
+            $totalAmount = (float) ($routeRow['totalAmount'] ?? 0);
+            $routePerformance[] = [
+                'route' => $routeRow['route'] ?? '',
+                'revenue' => $totalAmount,
+                'bookings' => $bookings,
+                'fillRate' => 0.0,
+                'averagePrice' => $bookings > 0 ? round($totalAmount / $bookings, 2) : 0.0,
+            ];
+        }
+
+        $revenueByPeriod = [];
+        foreach ($revenueChartData['labels'] as $index => $label) {
+            $revenueByPeriod[] = [
+                'period' => $label,
+                'revenue' => (float) ($revenueChartData['revenueSeries'][$index] ?? 0),
+                'reservations' => 0,
+                'growthRate' => 0.0,
+            ];
+        }
+
+        $userActivity = [];
+        $newUsersByPeriod = $this->userRepository->getNewUsersByPeriod($startDate, $endDate, 'daily');
+        $reservationsByDay = $this->reservationRepository->getReservationsByDay();
+        $reservationsByDayIndex = [];
+        foreach ($reservationsByDay as $row) {
+            $reservationsByDayIndex[$row['date']] = (int) ($row['count'] ?? 0);
+        }
+
+        foreach ($newUsersByPeriod as $row) {
+            $date = is_string($row['period']) ? $row['period'] : $row['period']->format('Y-m-d');
+            $userActivity[] = [
+                'date' => $date,
+                'newUsers' => (int) ($row['count'] ?? 0),
+                'activeUsers' => (int) ($row['count'] ?? 0),
+                'reservations' => $reservationsByDayIndex[$date] ?? 0,
+                'totalRevenue' => 0,
+            ];
+        }
+
+        $reservationStatusDistribution = $this->buildReservationStatusDistribution($startDate, $endDate);
+
+        return $this->json([
+            'success' => true,
+            'data' => [
+                'kpis' => [
+                    'totalRevenue' => (float) $platformRevenue,
+                    'grossTurnover' => 0.0,
+                    'netRevenue' => (float) $platformNetEarnings,
+                    'platformFees' => $platformFees['platformFees'] ?? 0.0,
+                    'totalReservations' => array_sum(array_column($routePerformance, 'bookings')),
+                    'totalTrips' => 0,
+                    'totalUsers' => $this->userRepository->count([]),
+                    'activeAgencies' => count($agencyMetrics),
+                    'totalAgencies' => $this->agencyRepository->count([]),
+                    'fillRate' => 0.0,
+                    'cancellationRate' => 0.0,
+                    'completionRate' => 0.0,
+                    'totalTransactions' => 0,
+                    'totalWithdrawals' => (float) $this->withdrawalRepository->getPendingWithdrawalsAmount(),
+                    'totalRefunds' => (float) $this->paymentLogRepository->getPendingRefundsAmount(),
+                    'revenueGrowthRate' => 0.0,
+                    'userGrowthRate' => 0.0,
+                    'reservationGrowthRate' => 0.0,
+                ],
+                'financialSummary' => $financialSummary,
+                'revenueByPeriod' => $revenueByPeriod,
+                'userActivity' => $userActivity,
+                'agencyPerformance' => $agencyPerformance,
+                'routePerformance' => $routePerformance,
+                'paymentDistribution' => array_map(fn($row) => [
+                    'method' => $row['label'] ?? '',
+                    'amount' => (float) ($row['value'] ?? 0),
+                    'count' => (int) ($row['value'] ?? 0),
+                    'percentage' => (float) ($row['percentage'] ?? 0),
+                ], $paymentDistribution),
+                'reservationStatusDistribution' => array_map(fn($row) => [
+                    'status' => $row['status'] ?? '',
+                    'count' => (int) ($row['count'] ?? 0),
+                    'percentage' => (float) ($row['percentage'] ?? 0),
+                    'amount' => (float) ($row['amount'] ?? 0),
+                ], $reservationStatusDistribution),
+                'revenueChartData' => [
+                    'labels' => $revenueChartData['labels'],
+                    'datasets' => [[
+                        'label' => 'Revenu total',
+                        'data' => array_map('floatval', $revenueChartData['revenueSeries']),
+                        'color' => '#2563eb',
+                        'fill' => 'rgba(37, 99, 235, 0.1)',
+                        'type' => 'line',
+                    ]],
+                ],
+                'reservationsChartData' => [
+                    'labels' => array_column($reservationsByDay, 'date'),
+                    'datasets' => [[
+                        'label' => 'Réservations',
+                        'data' => array_map(fn($row) => (int) ($row['count'] ?? 0), $reservationsByDay),
+                        'color' => '#2563eb',
+                        'type' => 'bar',
+                    ]],
+                ],
+                'userGrowthChartData' => [
+                    'labels' => array_map(fn($row) => is_string($row['period']) ? $row['period'] : $row['period']->format('Y-m-d'), $newUsersByPeriod),
+                    'datasets' => [[
+                        'label' => 'Nouveaux utilisateurs',
+                        'data' => array_map(fn($row) => (int) ($row['count'] ?? 0), $newUsersByPeriod),
+                        'color' => '#16a34a',
+                        'fill' => 'rgba(22, 163, 74, 0.1)',
+                        'type' => 'line',
+                    ]],
+                ],
+                'agencyPerformanceChartData' => [
+                    'labels' => array_column($agencyPerformance, 'agencyName'),
+                    'datasets' => [[
+                        'label' => 'Revenu par agence',
+                        'data' => array_map(fn($row) => (float) ($row['revenue'] ?? 0), $agencyPerformance),
+                        'color' => '#2563eb',
+                        'type' => 'bar',
+                    ]],
+                ],
+            ],
+            'timestamp' => (new \DateTime())->format(\DateTimeInterface::ATOM),
+        ]);
+    }
+
+    /**
+     * Get reservation status distribution for the report.
+     */
+    private function buildReservationStatusDistribution(\DateTimeInterface $startDate, \DateTimeInterface $endDate): array
+    {
+        $results = $this->reservationRepository->createQueryBuilder('r')
+            ->select('r.paymentStatus as status, COUNT(r.id) as count, SUM(r.totalAmount) as amount')
+            ->where('r.createdAt BETWEEN :start AND :end')
+            ->setParameter('start', $startDate)
+            ->setParameter('end', $endDate)
+            ->groupBy('r.paymentStatus')
+            ->getQuery()
+            ->getResult();
+
+        $distribution = [];
+        foreach ($results as $row) {
+            $distribution[] = [
+                'status' => $row['status'] ?? 'UNKNOWN',
+                'count' => (int) ($row['count'] ?? 0),
+                'percentage' => 0.0,
+                'amount' => (float) ($row['amount'] ?? 0),
+            ];
+        }
+
+        $total = array_sum(array_map(static fn($item) => $item['count'], $distribution));
+        if ($total > 0) {
+            foreach ($distribution as &$item) {
+                $item['percentage'] = round(($item['count'] / $total) * 100, 2);
+            }
+            unset($item);
+        }
+
+        return $distribution;
+    }
+
+    /**
+     * Transaction history across all types (payments, refunds, withdrawals, commissions, etc.)
      * with filtering, pagination, and full lifecycle status (pending -> completed/rejected).
      *
      * 👈 RÉÉCRIT (audit "doublons") : l'ancienne implémentation construisait
@@ -199,11 +411,11 @@ class AdminFinancialController extends AbstractController
         // colonne/entité de statut).
         if ($status) {
             $status = strtoupper($status);
-            $all = array_values(array_filter($all, static fn (array $tx) => $tx['status'] === $status));
+            $all = array_values(array_filter($all, static fn(array $tx) => $tx['status'] === $status));
         }
 
         // Tri par date d'initiation décroissante (la plus récente en premier)
-        usort($all, static fn (array $a, array $b) => strcmp((string) $b['initiatedAt'], (string) $a['initiatedAt']));
+        usort($all, static fn(array $a, array $b) => strcmp((string) $b['initiatedAt'], (string) $a['initiatedAt']));
 
         $total = count($all);
         $offset = ($page - 1) * $perPage;
@@ -492,7 +704,7 @@ class AdminFinancialController extends AbstractController
         if ($transactionType) {
             $ledgerSources = array_values(array_filter(
                 $ledgerSources,
-                fn (string $source) => $this->mapSourceToType($source) === $transactionType
+                fn(string $source) => $this->mapSourceToType($source) === $transactionType
             ));
             if (!$ledgerSources) {
                 return [];
@@ -1136,7 +1348,7 @@ class AdminFinancialController extends AbstractController
         $results = $query->getQuery()->getResult();
 
         $financialDetail = [];
-        $fixedCommissionPerReservation = 500.00; // 500 FCFA par réservation
+        $fixedCommissionPerReservation = WalletService::PLATFORM_FEE; // Platform fee per reservation
 
         foreach ($results as $row) {
             $ca = (float) ($row['ca'] ?? 0);

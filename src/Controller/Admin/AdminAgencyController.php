@@ -4,12 +4,15 @@ namespace App\Controller\Admin;
 
 use App\Entity\Agency;
 use App\Entity\AgencyDocument;
+use App\Entity\Agent;
 use App\Entity\Reservation;
 use App\Entity\Trip;
+use App\Entity\User;
 use App\Entity\Wallet;
 use App\Repository\AgencyRepository;
 use App\Repository\ReservationRepository;
 use App\Repository\TripRepository;
+use App\Repository\UserRepository;
 use App\Repository\WalletRepository;
 use App\Repository\WalletTransactionRepository;
 use App\Service\StatusMapperService;
@@ -18,6 +21,7 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Serializer\SerializerInterface;
 
@@ -36,7 +40,8 @@ class AdminAgencyController extends AbstractController
         private ReservationRepository $reservationRepository,
         private WalletRepository $walletRepository,
         private WalletTransactionRepository $walletTransactionRepository,
-        private StatusMapperService $statusMapperService,
+        private UserRepository $userRepository,
+        private UserPasswordHasherInterface $passwordHasher,
     ) {}
 
     /**
@@ -154,6 +159,39 @@ class AdminAgencyController extends AbstractController
             ], Response::HTTP_CONFLICT);
         }
 
+        // --- Validate the "admin" sub-payload (compte responsable de l'agence) ---
+        $adminData = $data['admin'] ?? null;
+        if (!is_array($adminData)) {
+            return $this->json([
+                'success' => false,
+                'message' => "Les informations du compte administrateur ('admin') sont obligatoires",
+            ], Response::HTTP_BAD_REQUEST);
+        }
+
+        $requiredAdminFields = ['name', 'email', 'phone', 'password'];
+        foreach ($requiredAdminFields as $field) {
+            if (empty($adminData[$field])) {
+                return $this->json([
+                    'success' => false,
+                    'message' => "Le champ 'admin.{$field}' est obligatoire",
+                ], Response::HTTP_BAD_REQUEST);
+            }
+        }
+
+        if ($this->userRepository->findOneBy(['email' => $adminData['email']])) {
+            return $this->json([
+                'success' => false,
+                'message' => 'Cette adresse email est déjà utilisée par un compte utilisateur existant',
+            ], Response::HTTP_CONFLICT);
+        }
+
+        if ($this->userRepository->findOneBy(['phoneNumber' => $adminData['phone']])) {
+            return $this->json([
+                'success' => false,
+                'message' => 'Ce numéro de téléphone est déjà utilisé par un compte utilisateur existant',
+            ], Response::HTTP_CONFLICT);
+        }
+
         $agency = new Agency();
 
         // Set fields from request
@@ -193,21 +231,51 @@ class AdminAgencyController extends AbstractController
             $agency->setRatingCache('0.00');
         }
 
-        // Create associated wallet
-        $wallet = new Wallet();
-        $wallet->setAgency($agency);
-        $wallet->setAvailableBalance(0.00);
-        $wallet->setReservedBalance(0.00);
-        // $wallet->setCurrency('FCFA');
-        $agency->setWallet($wallet);
+        try {
+            $this->em->wrapInTransaction(function () use ($agency, $adminData) {
+                // Create associated wallet
+                $wallet = new Wallet();
+                $wallet->setAgency($agency);
+                $wallet->setAvailableBalance(0.00);
+                $wallet->setReservedBalance(0.00);
+                // $wallet->setCurrency('FCFA');
+                $agency->setWallet($wallet);
 
-        $this->em->persist($agency);
-        $this->em->persist($wallet);
-        $this->em->flush();
+                $this->em->persist($agency);
+                $this->em->persist($wallet);
+
+                // Create the User account for the agency's responsible/admin
+                $user = new User();
+                $user->setFullName($adminData['name']);
+                $user->setEmail($adminData['email']);
+                $user->setPhoneNumber($adminData['phone']);
+                // villeResidence est obligatoire en base mais n'est pas collecté par ce
+                // formulaire de création interne (réservé au formulaire d'inscription passager).
+                $user->setVilleResidence($agency->getCity() ?: 'Non renseigné');
+                $user->setPassword($this->passwordHasher->hashPassword($user, $adminData['password']));
+                $this->em->persist($user);
+
+                // Create the Agent record linking this User to the Agency as its admin
+                $agent = new Agent();
+                $agent->setUser($user);
+                $agent->setAgency($agency);
+                $agent->setAgentRole('admin_agence');
+                $agent->setStatus('active');
+                $agent->setCommissionRate('0.00');
+                $this->em->persist($agent);
+
+                $this->em->flush();
+            });
+        } catch (\Throwable $e) {
+            return $this->json([
+                'success' => false,
+                'message' => "Erreur lors de la création de l'agence et du compte administrateur",
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
 
         return $this->json([
             'success' => true,
-            'message' => 'Agence créée avec succès',
+            'message' => "Agence et compte administrateur créés avec succès",
             'data' => $this->normalizeAgencyWithStats($agency),
         ], Response::HTTP_CREATED);
     }

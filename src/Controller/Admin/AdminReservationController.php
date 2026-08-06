@@ -143,7 +143,7 @@ class AdminReservationController extends AbstractController
         // Count by status
         $confirmed = $this->reservationRepository->count(['paymentStatus' => 'paye']);
         $completed = $this->reservationRepository->count(['paymentStatus' => 'termine']);
-        $cancelled = $this->reservationRepository->count(['paymentStatus' => 'annule']);
+        $cancelled = $this->reservationRepository->count(['paymentStatus' => 'annule', 'paymentStatus' => 'Remboursé']);
         $noShow = $this->reservationRepository->count(['paymentStatus' => 'no_show']);
         $pending = $this->reservationRepository->count(['paymentStatus' => 'en_attente']);
         $failed = $this->reservationRepository->count(['paymentStatus' => 'echoue']);
@@ -375,14 +375,19 @@ class AdminReservationController extends AbstractController
     #[Route('/{id}/cancel', name: 'api_admin_reservations_cancel', methods: ['PUT', 'PATCH'])]
     public function cancel(int $id, Request $request): JsonResponse
     {
-        $reservation = $this->reservationRepository->find($id);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
 
-        if (!$reservation) {
-            return $this->json([
-                'success' => false,
-                'message' => 'Réservation introuvable',
-            ], Response::HTTP_NOT_FOUND);
-        }
+        try {
+            $reservation = $this->reservationRepository->find($id);
+
+            if (!$reservation) {
+                $connection->rollBack();
+                return $this->json([
+                    'success' => false,
+                    'message' => 'Réservation introuvable',
+                ], Response::HTTP_NOT_FOUND);
+            }
 
         $data = json_decode($request->getContent(), true);
         $reason = $data['reason'] ?? 'Annulation administrative';
@@ -396,26 +401,36 @@ class AdminReservationController extends AbstractController
             ], 400);
         }
 
+        // Store original payment status BEFORE updating it, so we can check if refund is needed
+        $wasPaid = $reservation->getPaymentStatus() === 'paye';
+
         // Update reservation status
         $reservation->setPaymentStatus('annule');
 
         // Update all tickets
         foreach ($reservation->getTickets() as $ticket) {
             $ticket->setStatus('annule');
+            // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
+            $ticket->setQrCodeToken(null);
         }
 
         // Handle refund if requested and payment was made
-        if ($refund && $reservation->getPaymentStatus() === 'paye') {
+        if ($refund && $wasPaid) {
             $this->processRefund($reservation, $reason);
         }
 
         $this->em->flush();
+        $connection->commit();
 
         return $this->json([
             'success' => true,
             'message' => 'Réservation annulée avec succès',
             'data' => $this->normalizeReservationDetail($reservation),
         ]);
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            throw $e;
+        }
     }
 
     /**
@@ -808,7 +823,8 @@ class AdminReservationController extends AbstractController
         $status = strtolower($reservation->getPaymentStatus() ?? '');
         
         // Cannot cancel if already cancelled, completed, or failed
-        $cannotCancelStatuses = ['annule', 'annulée', 'termine', 'completee', 'completée', 'echoue', 'failed'];
+        // Note: 'annule' and 'rembourse' are both terminal states that prevent re-cancellation
+        $cannotCancelStatuses = ['annule', 'annulée', 'rembourse', 'remboursée', 'termine', 'completee', 'completée', 'echoue', 'failed'];
         
         return !in_array($status, $cannotCancelStatuses, true);
     }
