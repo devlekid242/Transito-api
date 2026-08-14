@@ -18,16 +18,18 @@ use Symfony\Component\Validator\Constraints as Assert;
     normalizationContext: ['groups' => ['notification:read']],
     denormalizationContext: ['groups' => ['notification:write']],
     operations: [
-        new GetCollection(),
+        new GetCollection(security: "is_granted('ROLE_ADMIN')"),
         new GetCollection(
             uriTemplate: '/notifications/unread',
             controller: NotificationController::class . '::getUnreadNotifications',
-            name: 'api_notifications_unread'
+            name: 'api_notifications_unread',
+            security: "is_granted('IS_AUTHENTICATED_FULLY')"
         ),
         new Put(
             uriTemplate: '/notifications/{id}/read',
             controller: NotificationController::class . '::markAsRead',
-            name: 'api_notifications_mark_read'
+            name: 'api_notifications_mark_read',
+            security: "is_granted('IS_AUTHENTICATED_FULLY')"
         )
     ]
 )]

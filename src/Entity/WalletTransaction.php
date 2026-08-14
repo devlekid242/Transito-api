@@ -6,6 +6,7 @@ use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\GetCollection;
 use App\Repository\WalletTransactionRepository;
 use Doctrine\DBAL\Types\Types;
+use ReflectionClass;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
 
@@ -21,7 +22,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
 #[ApiResource(
     normalizationContext: ['groups' => ['wallet_tx:read']],
     operations: [
-        new GetCollection(),
+        new GetCollection(security: "is_granted('ROLE_ADMIN')"),
     ]
 )]
 class WalletTransaction
@@ -31,10 +32,16 @@ class WalletTransaction
 
     // Crédit suite au paiement confirmé d'une réservation (montant brut)
     public const SOURCE_RESERVATION_PAYMENT = 'RESERVATION_PAYMENT';
-    // Débit correspondant à la commission plateforme prélevée sur un paiement
+    // Crédit correspondant à la commission plateforme encaissée sur un paiement
     public const SOURCE_PLATFORM_FEE = 'PLATFORM_FEE';
     // Débit suite au remboursement d'une réservation déjà créditée
     public const SOURCE_REFUND = 'REFUND';
+    // Déblocage des fonds suite à la validation du billet à l'embarquement (Solde Bloqué -> Solde Disponible)
+    public const SOURCE_TICKET_BOARDED = 'TICKET_BOARDED';
+    // Débit définitif du solde bloqué lorsqu'un passager ne se présente pas.
+    public const SOURCE_TICKET_NO_SHOW = 'TICKET_NO_SHOW';
+    // Crédit correspondant au montant net conservé par la plateforme après no-show.
+    public const SOURCE_NO_SHOW_REVENUE = 'NO_SHOW_REVENUE';
     // Débit : fonds gelés le temps qu'une demande de retrait soit traitée
     public const SOURCE_WITHDRAWAL_HOLD = 'WITHDRAWAL_HOLD';
     // Débit définitif : le retrait a été approuvé et versé
@@ -43,11 +50,12 @@ class WalletTransaction
     public const SOURCE_WITHDRAWAL_RELEASED = 'WITHDRAWAL_RELEASED';
     // Ajustement manuel (litige, correction...)
     public const SOURCE_ADJUSTMENT = 'ADJUSTMENT';
-    
+
     // Ajustement manuel par admin (crédit ou débit manuel)
     public const SOURCE_ADMIN_CREDIT = 'ADMIN_CREDIT';
     public const SOURCE_ADMIN_DEBIT = 'ADMIN_DEBIT';
-    
+    public const SOURCE_RESCHEDULE_ADJUSTMENT = 'RESCHEDULE_ADJUSTMENT';
+
     // Gel/dégel de portefeuille
     public const SOURCE_WALLET_FREEZE = 'WALLET_FREEZE';
     public const SOURCE_WALLET_UNFREEZE = 'WALLET_UNFREEZE';
@@ -83,6 +91,21 @@ class WalletTransaction
     #[ORM\Column(name: 'balance_after', type: Types::DECIMAL, precision: 12, scale: 2)]
     #[Groups(['wallet_tx:read'])]
     private ?string $balanceAfter = null;
+
+    // Snapshots des trois poches du wallet après chaque écriture.
+    // Ils permettent une réconciliation réelle du ledger, y compris lorsque
+    // le mouvement touche blocked/reserved sans modifier available.
+    #[ORM\Column(name: 'available_after', type: Types::DECIMAL, precision: 12, scale: 2, nullable: true)]
+    #[Groups(['wallet_tx:read'])]
+    private ?string $availableAfter = null;
+
+    #[ORM\Column(name: 'blocked_after', type: Types::DECIMAL, precision: 12, scale: 2, nullable: true)]
+    #[Groups(['wallet_tx:read'])]
+    private ?string $blockedAfter = null;
+
+    #[ORM\Column(name: 'reserved_after', type: Types::DECIMAL, precision: 12, scale: 2, nullable: true)]
+    #[Groups(['wallet_tx:read'])]
+    private ?string $reservedAfter = null;
 
     #[ORM\ManyToOne(targetEntity: Reservation::class)]
     #[ORM\JoinColumn(name: 'reservation_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
@@ -189,6 +212,39 @@ class WalletTransaction
         return $this;
     }
 
+    public function getAvailableAfter(): ?string
+    {
+        return $this->availableAfter;
+    }
+
+    public function setAvailableAfter(?string $availableAfter): static
+    {
+        $this->availableAfter = $availableAfter;
+        return $this;
+    }
+
+    public function getBlockedAfter(): ?string
+    {
+        return $this->blockedAfter;
+    }
+
+    public function setBlockedAfter(?string $blockedAfter): static
+    {
+        $this->blockedAfter = $blockedAfter;
+        return $this;
+    }
+
+    public function getReservedAfter(): ?string
+    {
+        return $this->reservedAfter;
+    }
+
+    public function setReservedAfter(?string $reservedAfter): static
+    {
+        $this->reservedAfter = $reservedAfter;
+        return $this;
+    }
+
     public function getReservation(): ?Reservation
     {
         return $this->reservation;
@@ -247,5 +303,36 @@ class WalletTransaction
     {
         $this->adminReason = $adminReason;
         return $this;
+    }
+    /**
+     * Retourne toutes les valeurs possibles pour `type` (CREDIT/DEBIT).
+     */
+    public static function getAvailableTypes(): array
+    {
+        return self::extractConstants('TYPE_');
+    }
+
+    /**
+     * Retourne toutes les valeurs possibles pour `source`.
+     */
+    public static function getAvailableSources(): array
+    {
+        return self::extractConstants('SOURCE_');
+    }
+
+    private static function extractConstants(string $prefix): array
+    {
+        $reflection = new ReflectionClass(self::class);
+        $constants = [];
+
+        foreach ($reflection->getConstants() as $name => $value) {
+            if (str_starts_with($name, $prefix)) {
+                $constants[] = $value;
+            }
+        }
+
+        sort($constants);
+
+        return $constants;
     }
 }

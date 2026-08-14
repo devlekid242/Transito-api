@@ -2,7 +2,12 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Agency;
+use App\Entity\AgencyPoint;
+use App\Entity\Bus;
 use App\Entity\AgencyDocument;
 use App\Entity\Agent;
 use App\Entity\Reservation;
@@ -16,6 +21,8 @@ use App\Repository\UserRepository;
 use App\Repository\WalletRepository;
 use App\Repository\WalletTransactionRepository;
 use App\Service\StatusMapperService;
+use App\Service\AgencyOperationalImpactService;
+use App\Service\AuditLogger;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -30,6 +37,7 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Provides full CRUD operations for agencies management.
  */
 #[Route('/api/admin/agencies')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class AdminAgencyController extends AbstractController
 {
     public function __construct(
@@ -42,6 +50,9 @@ class AdminAgencyController extends AbstractController
         private WalletTransactionRepository $walletTransactionRepository,
         private UserRepository $userRepository,
         private UserPasswordHasherInterface $passwordHasher,
+        private StatusMapperService $statusMapperService,
+        private AgencyOperationalImpactService $agencyOperationalImpactService,
+        private AuditLogger $auditLogger,
     ) {}
 
     /**
@@ -117,6 +128,7 @@ class AdminAgencyController extends AbstractController
                 'message' => 'Agence introuvable',
             ], Response::HTTP_NOT_FOUND);
         }
+
 
         return $this->json([
             'success' => true,
@@ -342,6 +354,33 @@ class AdminAgencyController extends AbstractController
             }
         }
 
+        $adminData = $data['admin'] ?? null;
+        // return $this->Json($data, Response::HTTP_BAD_REQUEST);
+        
+        if (is_array($adminData)) {
+            $adminAgence = $this->em->getRepository(Agent::class)->findOneBy([
+                'agency' => $agency,
+                'agentRole' => 'admin_agence',
+            ]);
+
+            if ($adminAgence) {
+                $user = $adminAgence->getUser();
+                if (isset($adminData['name'])) {
+                    $user->setFullName($adminData['name']);
+                }
+                if (isset($adminData['email'])) {
+                    $user->setEmail($adminData['email']);
+                }
+                if (isset($adminData['phone'])) {
+                    $user->setPhoneNumber($adminData['phone']);
+                }
+                if (isset($adminData['password']) && !empty($adminData['password'])) {
+                    $user->setPassword($this->passwordHasher->hashPassword($user, $adminData['password']));
+                }
+                $this->em->persist($user);
+            }
+        }
+
         $this->em->persist($agency);
         $this->em->flush();
 
@@ -353,32 +392,75 @@ class AdminAgencyController extends AbstractController
     }
 
     /**
-     * Suspend or activate an agency.
+     * Preview the operational impact of suspending an agency. Read-only.
      */
-    #[Route('/{id}/toggle-status', name: 'api_admin_agency_toggle_status', methods: ['PUT'])]
-    public function toggleStatus(int $id): JsonResponse
+    #[Route('/{id}/operational-impact', name: 'api_admin_agency_operational_impact', methods: ['GET'])]
+    public function operationalImpact(int $id): JsonResponse
     {
         $agency = $this->agencyRepository->find($id);
-
         if (!$agency) {
-            return $this->json([
-                'success' => false,
-                'message' => 'Agence introuvable',
-            ], Response::HTTP_NOT_FOUND);
+            return $this->json(['success' => false, 'message' => 'Agence introuvable'], Response::HTTP_NOT_FOUND);
+        }
+
+        return $this->json([
+            'success' => true,
+            'data' => $this->agencyOperationalImpactService->preview($agency),
+        ]);
+    }
+
+    /**
+     * Suspend or activate an agency. Suspension never cancels/refunds automatically.
+     * When future paid reservations exist, confirmation is required explicitly.
+     */
+    #[Route('/{id}/toggle-status', name: 'api_admin_agency_toggle_status', methods: ['PUT'])]
+    public function toggleStatus(int $id, Request $request): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable'], Response::HTTP_NOT_FOUND);
         }
 
         $newStatus = $agency->getStatus() === 'active' ? 'suspended' : 'active';
-        $agency->setStatus($newStatus);
+        if ($newStatus === 'suspended') {
+            $impact = $this->agencyOperationalImpactService->preview($agency);
+            $confirm = $request->request->getBoolean('confirm', false);
+            if (!$confirm && $impact['requiresTripDecision']) {
+                return $this->json([
+                    'success' => false,
+                    'code' => 'AGENCY_SUSPENSION_CONFIRMATION_REQUIRED',
+                    'message' => 'Cette agence possède des voyages futurs avec des réservations payées. La suspension bloque les nouvelles ventes mais n’annule aucun voyage ni remboursement automatiquement. Confirmez explicitement la suspension.',
+                    'data' => $impact,
+                ], Response::HTTP_CONFLICT);
+            }
+        } else {
+            if ($agency->getStatus() === 'pending') {
+                return $this->json([
+                    'success' => false,
+                    'message' => 'Une agence en attente doit être approuvée avant activation.',
+                ], Response::HTTP_CONFLICT);
+            }
+        }
 
+        $before = ['status' => $agency->getStatus()];
+        $agency->setStatus($newStatus);
         $this->em->persist($agency);
+        $this->auditLogger->record(
+            $newStatus === 'suspended' ? 'AGENCY_SUSPENDED' : 'AGENCY_REACTIVATED',
+            'Agency',
+            (string) $agency->getId(),
+            $before,
+            ['status' => $newStatus],
+            ['source' => 'admin.agency.toggle-status']
+        );
         $this->em->flush();
 
         return $this->json([
             'success' => true,
-            'message' => 'Statut de l\'agence mis à jour',
+            'message' => $newStatus === 'suspended' ? 'Agence suspendue. Les opérations futures restent intactes jusqu’à décision explicite sur les voyages concernés.' : 'Agence réactivée avec succès',
             'data' => [
                 'id' => $agency->getId(),
                 'status' => $agency->getStatus(),
+                'operationalImpact' => $newStatus === 'suspended' ? $this->agencyOperationalImpactService->preview($agency) : null,
             ],
         ]);
     }
@@ -615,6 +697,123 @@ class AdminAgencyController extends AbstractController
     }
 
     /**
+     * Get all agents linked to an agency.
+     * Includes the agency administrator (agentRole = admin_agence).
+     */
+    #[Route('/{id}/agents', name: 'api_admin_agency_agents', requirements: ['id' => '\d+'], methods: ['GET'])]
+    public function getAgents(int $id): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable'], Response::HTTP_NOT_FOUND);
+        }
+
+        $agents = $this->em->getRepository(Agent::class)->findBy(
+            ['agency' => $agency],
+            ['id' => 'ASC']
+        );
+
+        return $this->json([
+            'success' => true,
+            'data' => array_map([$this, 'normalizeAgent'], $agents),
+        ]);
+    }
+
+    /** Get all buses belonging to an agency. */
+    #[Route('/{id}/buses', name: 'api_admin_agency_buses', requirements: ['id' => '\d+'], methods: ['GET'])]
+    public function getBuses(int $id): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable'], Response::HTTP_NOT_FOUND);
+        }
+
+        $buses = $this->em->getRepository(Bus::class)->findBy(
+            ['agency' => $agency],
+            ['id' => 'DESC']
+        );
+
+        return $this->json([
+            'success' => true,
+            'data' => array_map([$this, 'normalizeBus'], $buses),
+        ]);
+    }
+
+    /** Get all boarding points belonging to an agency. */
+    #[Route('/{id}/boarding-points', name: 'api_admin_agency_boarding_points', requirements: ['id' => '\d+'], methods: ['GET'])]
+    public function getBoardingPoints(int $id): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable'], Response::HTTP_NOT_FOUND);
+        }
+
+        $points = $this->em->getRepository(AgencyPoint::class)->findBy(
+            ['agency' => $agency],
+            ['city' => 'ASC', 'name' => 'ASC']
+        );
+
+        return $this->json([
+            'success' => true,
+            'data' => array_map([$this, 'normalizeBoardingPoint'], $points),
+        ]);
+    }
+
+    private function normalizeAgent(Agent $agent): array
+    {
+        $user = $agent->getUser();
+        return [
+            'id' => $agent->getId(),
+            'userId' => $user?->getId(),
+            'name' => $user?->getFullName(),
+            'email' => $user?->getEmail(),
+            'phone' => $user?->getPhoneNumber(),
+            'role' => $agent->getAgentRole(),
+            'status' => $agent->getStatus(),
+            'commissionRate' => method_exists($agent, 'getCommissionRate') ? (float) $agent->getCommissionRate() : 0,
+        ];
+    }
+
+    private function normalizeBus(Bus $bus): array
+    {
+        return [
+            'id' => $bus->getId(),
+            'registrationNumber' => $bus->getRegistrationNumber(),
+            'capacity' => $bus->getCapacity(),
+            'brand' => $bus->getBrand(),
+            'model' => $bus->getModel(),
+            'category' => $bus->getCategory(),
+            'status' => $bus->getStatus(),
+            'color' => method_exists($bus, 'getColor') ? $bus->getColor() : null,
+            'acquisitionDate' => $bus->getAcquisitionDate()?->format('Y-m-d'),
+            'lastMaintenanceDate' => $bus->getLastMaintenanceDate()?->format('Y-m-d'),
+            'mileage' => $bus->getMileage(),
+        ];
+    }
+
+    private function normalizeBoardingPoint(AgencyPoint $point): array
+    {
+        return [
+            'id' => $point->getId(),
+            'city' => $point->getCity(),
+            'name' => $point->getName(),
+            'address' => $point->getAddress(),
+            'quartier' => $point->getQuartier(),
+            'phoneNumber' => $point->getPhone(),
+            'latitude' => $point->getLatitude(),
+            'longitude' => $point->getLongitude(),
+            'pointType' => $point->getPointType(),
+            'status' => $point->getStatus(),
+            'isActive' => (bool) $point->isActive(),
+            'hasVipLounge' => (bool) $point->getHasVipLounge(),
+            'hasWifi' => (bool) $point->getHasWifi(),
+            'hasAc' => (bool) $point->getHasAc(),
+            'hasParking' => (bool) $point->getHasParking(),
+            'createdAt' => $point->getCreatedAt()?->format('c'),
+        ];
+    }
+
+    /**
      * Get agency KYC status distribution.
      */
     #[Route('/kyc-distribution', name: 'api_admin_agencies_kyc_distribution', methods: ['GET'])]
@@ -656,7 +855,12 @@ class AdminAgencyController extends AbstractController
      */
     private function normalizeAgency(Agency $agency): array
     {
-        $wallet = $agency->getWallet();
+        // $wallet = $agency->getWallet();
+
+        $adminAgence = $this->em->getRepository(Agent::class)->findOneBy([
+            'agency' => $agency,
+            'agentRole' => 'admin_agence',
+        ]);
 
         return [
             'id' => $agency->getId(),
@@ -674,6 +878,12 @@ class AdminAgencyController extends AbstractController
             'ratingCache' => $agency->getRatingCache(),
             'commissionRate' => $agency->getCommissionRate(),
             'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'admin' => $adminAgence ? [
+                'id' => $adminAgence->getUser()?->getId(),
+                'name' => $adminAgence->getUser()?->getFullName(),
+                'email' => $adminAgence->getUser()?->getEmail(),
+                'phone' => $adminAgence->getUser()?->getPhoneNumber(),
+            ] : null,
         ];
     }
 
@@ -729,9 +939,12 @@ class AdminAgencyController extends AbstractController
             ];
         }
 
-        // Add counts
+        // Add operational counts used by the admin agency detail page.
         $data['tripsCount'] = $this->tripRepository->count(['agency' => $agency]);
         $data['reservationsCount'] = $this->reservationRepository->countReservationsByAgency($agency);
+        $data['agentsCount'] = $this->em->getRepository(Agent::class)->count(['agency' => $agency]);
+        $data['busesCount'] = $this->em->getRepository(Bus::class)->count(['agency' => $agency]);
+        $data['boardingPointsCount'] = $this->em->getRepository(AgencyPoint::class)->count(['agency' => $agency]);
 
         return $data;
     }

@@ -28,6 +28,20 @@ class DeviceTokenRepository extends ServiceEntityRepository
         return $this->findOneBy(['token' => $token]);
     }
 
+    /** @return DeviceToken[] */
+    public function findByAgencyId(int $agencyId): array
+    {
+        return $this->createQueryBuilder('d')
+            ->innerJoin('d.user', 'u')
+            ->innerJoin('App\Entity\Agent', 'a', 'WITH', 'a.user = u')
+            ->andWhere('a.agency = :agencyId')
+            ->andWhere('a.status = :active')
+            ->setParameter('agencyId', $agencyId)
+            ->setParameter('active', 'active')
+            ->getQuery()
+            ->getResult();
+    }
+
     /**
      * Supprime les tokens devenus invalides (désinstallation, token expiré...)
      * signalés par Firebase lors de l'envoi. Évite de continuer à essayer de

@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Agency;
 use App\Entity\PaymentLog;
 use App\Entity\Reservation;
@@ -14,6 +17,7 @@ use App\Repository\ReservationRepository;
 use App\Repository\TicketRepository;
 use App\Repository\TripRepository;
 use App\Repository\UserRepository;
+use App\Service\DomainStateTransitionService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -27,6 +31,7 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Provides endpoints for listing, filtering, creating, and managing platform reservations.
  */
 #[Route('/api/admin/reservations')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class AdminReservationController extends AbstractController
 {
     public function __construct(
@@ -38,6 +43,7 @@ class AdminReservationController extends AbstractController
         private AgencyRepository $agencyRepository,
         private TripRepository $tripRepository,
         private TicketRepository $ticketRepository,
+        private DomainStateTransitionService $stateTransitions,
     ) {}
 
     /**
@@ -350,7 +356,7 @@ class AdminReservationController extends AbstractController
         }
 
         if (isset($data['paymentStatus'])) {
-            $reservation->setPaymentStatus($data['paymentStatus']);
+            $this->stateTransitions->transitionReservationPayment($reservation, (string) $data['paymentStatus']);
         }
 
         if (isset($data['tripId'])) {
@@ -405,11 +411,11 @@ class AdminReservationController extends AbstractController
         $wasPaid = $reservation->getPaymentStatus() === 'paye';
 
         // Update reservation status
-        $reservation->setPaymentStatus('annule');
+        $this->stateTransitions->transitionReservationPayment($reservation, 'annule');
 
         // Update all tickets
         foreach ($reservation->getTickets() as $ticket) {
-            $ticket->setStatus('annule');
+            $this->stateTransitions->transitionTicket($ticket, 'annule');
             // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
             $ticket->setQrCodeToken(null);
         }
@@ -787,7 +793,7 @@ class AdminReservationController extends AbstractController
         $paymentLog->setStatus('SUCCESS');
 
         // Update reservation payment info
-        $reservation->setPaymentStatus('paye');
+        $this->stateTransitions->transitionReservationPayment($reservation, 'paye');
         $reservation->setPaymentMethod($paymentLog->getOperator());
         
         if (!$reservation->getTransactionReference()) {

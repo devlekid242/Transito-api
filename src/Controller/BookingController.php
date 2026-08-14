@@ -7,12 +7,16 @@ use App\Entity\Notification;
 use App\Entity\PaymentLog;
 use App\Entity\RefundRequest;
 use App\Entity\Reservation;
+use App\Entity\ReservationReschedule;
 use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Entity\User;
+use App\Service\DomainStateTransitionService;
 use App\Service\AdminNotificationService;
+use App\Service\AuditLogger;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
+use App\Service\RescheduleQuoteService;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -20,6 +24,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use App\Repository\ReservationRepository;
 
 class BookingController extends AbstractController
@@ -38,7 +43,15 @@ class BookingController extends AbstractController
     private const MAX_PASSENGERS_PER_BOOKING = 10;
 
     
-    public function __construct(private EntityManagerInterface $em, private NotificationBroadcastService $notificationBroadcaster, private WalletService $walletService) {}
+    public function __construct(
+        private EntityManagerInterface $em,
+        private NotificationBroadcastService $notificationBroadcaster,
+        private WalletService $walletService,
+        private DomainStateTransitionService $stateTransitions,
+        private AuditLogger $auditLogger,
+        private RescheduleQuoteService $rescheduleQuoteService,
+        #[Autowire('%env(int:PAYMENT_RESERVATION_TTL_MINUTES)%')] private int $paymentReservationTtlMinutes,
+    ) {}
 
     #[Route('/api/bookings', name: 'create_booking', methods: ['POST'])]
     public function create(Request $request, ReservationRepository $reservationRepository): JsonResponse
@@ -58,6 +71,7 @@ class BookingController extends AbstractController
         $tripId = $data['tripId'] ?? null;
         $passengers = $data['passengers'] ?? [];
         $baggages = $data['baggages'] ?? [];
+        $requestedSeatNumbers = $data['seatNumbers'] ?? $data['seat_numbers'] ?? null;
         // NOTE SÉCURITÉ : `totalPrice` envoyé par le client n'est utilisé que pour
         // information ; le montant réellement facturé est TOUJOURS recalculé
         // ci-dessous à partir du prix du trajet en base (voir $computedTotal).
@@ -94,7 +108,7 @@ class BookingController extends AbstractController
             }
 
             // --- Règles métier appliquées par les agences de transport ---
-            if (in_array($trip->getStatus(), ['annule', 'termine'], true)) {
+            if ($trip->getStatus() !== 'planifie') {
                 $connection->rollBack();
                 return new JsonResponse(['error' => 'Ce voyage n\'est plus disponible à la réservation.'], 422);
             }
@@ -106,29 +120,84 @@ class BookingController extends AbstractController
 
             $bus = $trip->getBus();
             $capacity = $bus ? $bus->getCapacity() : null;
-            $seatsReserved = (int) $trip->getSeatsReserved();
             $seatsRequested = count($passengers);
 
-            if ($capacity !== null && ($seatsReserved + $seatsRequested) > $capacity) {
+            if ($capacity === null || $capacity < 1) {
                 $connection->rollBack();
-                $remaining = max(0, $capacity - $seatsReserved);
-                return new JsonResponse([
-                    'error' => $remaining > 0
-                        ? sprintf('Il ne reste que %d place(s) disponible(s) sur ce trajet.', $remaining)
-                        : 'Ce trajet est complet.',
-                    'availableSeats' => $remaining,
-                ], 409);
+                return new JsonResponse(['error' => 'La capacité du bus est invalide.'], 422);
             }
 
-            // --- Prix recalculé côté serveur : la seule source de vérité ---
-            $pricePerSeat = (float) $trip->getPrice();
-            $computedSubtotal = $pricePerSeat * $seatsRequested;
-            $computedTotal = $computedSubtotal + WalletService::PLATFORM_FEE;
+            // Source de vérité des places : les billets encore actifs.
+            // seatsReserved reste un compteur de cache/lecture, mais ne décide
+            // plus seul si une place est libre.
+            $occupiedTickets = $this->em->getRepository(Ticket::class)->createQueryBuilder('t')
+                ->join('t.reservation', 'r')
+                ->andWhere('r.trip = :trip')
+                // Une réservation impayée dont le TTL est dépassé ne doit plus
+                // bloquer une place, même si le cron d'expiration n'a pas encore tourné.
+                ->andWhere('(r.paymentStatus = :paidStatus OR (r.paymentStatus = :pendingStatus AND (r.paymentExpiresAt IS NULL OR r.paymentExpiresAt > :now)))')
+                ->andWhere('t.status IN (:ticketStatuses)')
+                ->setParameter('trip', $trip)
+                ->setParameter('paidStatus', 'paye')
+                ->setParameter('pendingStatus', 'en_attente')
+                ->setParameter('now', new \DateTime())
+                ->setParameter('ticketStatuses', ['en_attente', 'embarque'])
+                ->getQuery()->getResult();
+            $occupiedSeats = [];
+            foreach ($occupiedTickets as $occupiedTicket) {
+                $seat = $occupiedTicket->getSeatNumber();
+                if ($seat !== null) {
+                    $occupiedSeats[(int) $seat] = true;
+                }
+            }
+
+            $seatNumbers = [];
+            if (is_array($requestedSeatNumbers) && count($requestedSeatNumbers) > 0) {
+                if (count($requestedSeatNumbers) !== $seatsRequested) {
+                    $connection->rollBack();
+                    return new JsonResponse(['error' => 'Le nombre de sièges doit correspondre au nombre de passagers.'], 422);
+                }
+                foreach ($requestedSeatNumbers as $rawSeat) {
+                    $seat = (int) $rawSeat;
+                    if ($seat < 1 || $seat > $capacity) {
+                        $connection->rollBack();
+                        return new JsonResponse(['error' => sprintf('Le siège %d est invalide.', $seat)], 422);
+                    }
+                    if (isset($seatNumbers[$seat]) || isset($occupiedSeats[$seat])) {
+                        $connection->rollBack();
+                        return new JsonResponse(['error' => sprintf('Le siège %d n’est plus disponible.', $seat)], 409);
+                    }
+                    $seatNumbers[$seat] = $seat;
+                }
+                $seatNumbers = array_values($seatNumbers);
+            } else {
+                for ($seat = 1; $seat <= $capacity && count($seatNumbers) < $seatsRequested; ++$seat) {
+                    if (!isset($occupiedSeats[$seat])) {
+                        $seatNumbers[] = $seat;
+                    }
+                }
+                if (count($seatNumbers) !== $seatsRequested) {
+                    $connection->rollBack();
+                    return new JsonResponse([
+                        'error' => 'Ce trajet ne dispose pas de suffisamment de places.',
+                        'availableSeats' => count($seatNumbers),
+                    ], 409);
+                }
+            }
+            $seatsReserved = count($occupiedSeats) + $seatsRequested;
+
+            // --- Prix recalculé côté serveur : aucune valeur financière fournie
+            // par le client n'est utilisée. Tous les calculs restent en BCMath. ---
+            $pricePerSeat = (string) $trip->getPrice();
+            $computedSubtotal = bcmul($pricePerSeat, (string) $seatsRequested, 2);
+            $platformFee = number_format(WalletService::PLATFORM_FEE, 2, '.', '');
+            $computedTotal = bcadd($computedSubtotal, $platformFee, 2);
+            $netSettlement = $computedSubtotal;
 
             $reservation = new Reservation();
             $reservation->setUser($user);
             $reservation->setTrip($trip);
-            $reservation->setTotalAmount((string)$computedTotal);
+            $reservation->setTotalAmount($computedTotal);
 
             $paymentPhone = $data['paymentPhone'] ?? (method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : '');
             $reservation->setPaymentPhone($paymentPhone ?: '');
@@ -141,19 +210,32 @@ class BookingController extends AbstractController
             }
             $reservation->setPaymentMethod($paymentMethod);
             $reservation->setTransactionReference(uniqid('txn_', true));
+            // Une réservation impayée réserve temporairement les sièges.
+            // Sans expiration, un abandon du paiement bloquait définitivement
+            // la capacité du voyage. 15 minutes est la durée de réservation
+            // temporaire avant libération automatique.
+            $reservation->setPaymentExpiresAt((new \DateTimeImmutable())->modify(sprintf('+%d minutes', max(1, $this->paymentReservationTtlMinutes))));
 
             $this->em->persist($reservation);
 
             $createdTickets = [];
-            foreach ($passengers as $p) {
+            foreach ($passengers as $index => $p) {
                 $ticket = new Ticket();
                 $ticket->setReservation($reservation);
                 $ticket->setPassengerName(trim((string)($p['fullName'] ?? ($p['name'] ?? 'Passager'))));
                 $ticket->setPassengerPhone(trim((string)($p['phoneNumber'] ?? $paymentPhone ?? '')));
                 $ticket->setPassengerCni($p['identityNumber'] ?? 'N/A');
 
-                $seatsReserved++;
-                $ticket->setSeatNumber($seatsReserved);
+                $ticket->setSeatNumber($seatNumbers[$index]);
+
+                // Le règlement agence est déterminé dès la création du billet.
+                // Cela évite toute nouvelle division lors du paiement/embarquement.
+                $ticketCount = count($passengers);
+                $baseSettlement = bcdiv($netSettlement, (string) $ticketCount, 2);
+                $settlement = ($index === $ticketCount - 1)
+                    ? bcsub($netSettlement, bcmul($baseSettlement, (string) max(0, $ticketCount - 1), 2), 2)
+                    : $baseSettlement;
+                $ticket->setSettlementAmount($settlement);
 
                 try {
                     $token = bin2hex(random_bytes(16));
@@ -213,6 +295,13 @@ class BookingController extends AbstractController
                 $this->em->persist($agencyNotification);
             }
 
+            $this->em->flush();
+            $this->auditLogger->record('BOOKING_CREATED', 'Reservation', (string) $reservation->getId(), null, [
+                'paymentStatus' => $reservation->getPaymentStatus(),
+                'totalAmount' => $reservation->getTotalAmount(),
+                'tripId' => $trip->getId(),
+                'ticketCount' => $seatsRequested,
+            ], ['source' => 'booking.create']);
             $this->em->flush();
             $connection->commit();
         } catch (\Throwable $e) {
@@ -343,10 +432,10 @@ class BookingController extends AbstractController
             ->join('r.trip', 't')
             ->where('u.id = :uid')
             ->andWhere('t.departureTime > :now')
-            ->andWhere('r.paymentStatus != :cancelled')
+            ->andWhere('r.paymentStatus IN (:activeStatuses)')
             ->setParameter('uid', $user->getId())
             ->setParameter('now', new \DateTime())
-            ->setParameter('cancelled', 'rembourse')
+            ->setParameter('activeStatuses', ['en_attente', 'paye'])
             ->orderBy('t.departureTime', 'ASC');
 
         $reservations = $qb->getQuery()->getResult();
@@ -380,6 +469,9 @@ class BookingController extends AbstractController
 
         $trip = $this->em->getRepository(Trip::class)->find($tripId);
         if (!$trip) return new JsonResponse(['error' => 'Trip not found'], 404);
+        if ($trip->getStatus() !== 'planifie' || !$trip->getDepartureTime() || $trip->getDepartureTime() <= new \DateTime()) {
+            return new JsonResponse(['error' => "Ce voyage n'est plus disponible à la réservation."], 422);
+        }
 
         $bus = $trip->getBus();
         $capacity = $bus ? $bus->getCapacity() : null;
@@ -393,11 +485,13 @@ class BookingController extends AbstractController
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
             ->where('tr.id = :trip')
-            ->andWhere('t.status != :cancelledTicket')
-            ->andWhere('r.paymentStatus != :cancelledReservation')
+            ->andWhere('t.status IN (:ticketStatuses)')
+            ->andWhere('(r.paymentStatus = :paidStatus OR (r.paymentStatus = :pendingStatus AND (r.paymentExpiresAt IS NULL OR r.paymentExpiresAt > :now)))')
             ->setParameter('trip', $tripId)
-            ->setParameter('cancelledTicket', 'annule')
-            ->setParameter('cancelledReservation', 'rembourse');
+            ->setParameter('ticketStatuses', ['en_attente', 'embarque'])
+            ->setParameter('paidStatus', 'paye')
+            ->setParameter('pendingStatus', 'en_attente')
+            ->setParameter('now', new \DateTime());
         $results = $qb->getQuery()->getArrayResult();
         $taken = array_map(fn($r) => (int)$r['seatNumber'], $results);
 
@@ -453,6 +547,348 @@ class BookingController extends AbstractController
      *     file d'attente de remboursements admin.
      *  5) Une notification est envoyée au client (et à l'agence).
      */
+    #[Route('/api/bookings/{id}/reschedule/quote', name: 'reschedule_booking_quote', methods: ['POST'])]
+    public function rescheduleQuote(int $id, Request $request): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) return new JsonResponse(['error' => 'Authentification requise.'], 401);
+        $reservation = $this->em->getRepository(Reservation::class)->find($id);
+        if (!$reservation || $reservation->getUser()?->getId() !== $user->getId()) return new JsonResponse(['error' => 'Réservation introuvable.'], 404);
+        $data = json_decode($request->getContent(), true) ?? [];
+        try {
+            $quote = $this->rescheduleQuoteService->quote($reservation, (int) ($data['trip_id'] ?? 0), $data['seatNumbers'] ?? $data['seat_numbers'] ?? null);
+            return new JsonResponse([
+                'success' => true,
+                'quote' => [
+                    'reservationId' => $reservation->getId(),
+                    'fromTripId' => $quote['fromTrip']->getId(),
+                    'toTripId' => $quote['newTrip']->getId(),
+                    'ticketCount' => count($quote['tickets']),
+                    'oldTotal' => $quote['oldTotal'],
+                    'newTotal' => $quote['newTotal'],
+                    'difference' => $quote['difference'],
+                    'direction' => $quote['direction'],
+                    'seatNumbers' => $quote['seatNumbers'],
+                    'expiresAt' => (new \DateTimeImmutable('+10 minutes'))->format('c'),
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            return new JsonResponse(['error' => $e->getMessage()], 422);
+        }
+    }
+
+    #[Route('/api/bookings/{id}/reschedule/initiate', name: 'reschedule_booking_initiate', methods: ['POST'])]
+    public function initiateReschedule(int $id, Request $request): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) return new JsonResponse(['error' => 'Authentification requise.'], 401);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        try {
+            $reservation = $this->em->getRepository(Reservation::class)->find($id, LockMode::PESSIMISTIC_WRITE);
+            if (!$reservation || $reservation->getUser()?->getId() !== $user->getId()) { $connection->rollBack(); return new JsonResponse(['error' => 'Réservation introuvable.'], 404); }
+            $data = json_decode($request->getContent(), true) ?? [];
+            $quote = $this->rescheduleQuoteService->quote($reservation, (int) ($data['trip_id'] ?? 0), $data['seatNumbers'] ?? $data['seat_numbers'] ?? null);
+            $existing = $this->em->getRepository(ReservationReschedule::class)->findOneBy(['reservation' => $reservation]);
+            if ($existing && $existing->getStatus() !== ReservationReschedule::STATUS_FAILED) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Un report est déjà en cours ou a déjà été effectué.'], 409);
+            }
+
+            $adjustment = (new ReservationReschedule())
+                ->setReservation($reservation)
+                ->setFromTrip($quote['fromTrip'])
+                ->setToTrip($quote['newTrip'])
+                ->setOldTotal($quote['oldTotal'])
+                ->setNewTotal($quote['newTotal'])
+                ->setDifference($quote['difference'])
+                ->setDirection($quote['direction'])
+                ->setRequestedSeats($quote['seatNumbers'])
+                ->setQuoteExpiresAt(new \DateTimeImmutable('+10 minutes'));
+
+            if ($quote['direction'] === 'PAYMENT') {
+                $adjustment->setStatus(ReservationReschedule::STATUS_PAYMENT_PENDING);
+                $this->em->persist($adjustment);
+                $this->em->flush();
+                $intent = new \App\Entity\PaymentIntent();
+                $intent->setUser($user)->setReservation($reservation)->setReschedule($adjustment)
+                    ->setPurpose(\App\Entity\PaymentIntent::PURPOSE_RESCHEDULE)
+                    ->setAmount($quote['difference'])
+                    ->setOperator($reservation->getPaymentMethod() ?? 'MTN_MOMO');
+                $this->em->persist($intent);
+                $this->em->flush();
+                $connection->commit();
+                return new JsonResponse(['success' => true, 'status' => 'PAYMENT_REQUIRED', 'transactionId' => $intent->getReference(), 'amount' => $quote['difference'], 'rescheduleId' => $adjustment->getId()], 201);
+            }
+
+            if ($quote['direction'] === 'REFUND') {
+                $adjustment->setStatus(ReservationReschedule::STATUS_REFUND_REQUIRED);
+                $this->em->persist($adjustment);
+                $this->em->flush();
+
+                // A cheaper destination trip creates a refund request for the
+                // DIFFERENCE only. It is explicitly linked to the reschedule
+                // so AdminRefundController cannot accidentally refund the
+                // complete original reservation amount.
+                $refundAmount = bcsub('0.00', $quote['difference'], 2);
+                $refundRequest = new RefundRequest();
+                $refundRequest->setAgency($quote['fromTrip']->getAgency());
+                $refundRequest->setReservation($reservation);
+                $refundRequest->setReschedule($adjustment);
+                $refundRequest->setRequestedBy($user);
+                $refundRequest->setRequestedAmount($refundAmount);
+                $refundRequest->setReason('Remboursement de la différence de prix suite à un report de voyage.');
+                $this->em->persist($refundRequest);
+                $this->em->flush();
+
+                $connection->commit();
+                return new JsonResponse([
+                    'success' => true,
+                    'status' => 'REFUND_REQUIRED',
+                    'refundAmount' => $refundAmount,
+                    'refundRequestId' => $refundRequest->getId(),
+                    'rescheduleId' => $adjustment->getId(),
+                    'message' => 'La différence doit être remboursée avant la finalisation du report.',
+                ], 202);
+            }
+
+            $adjustment->setStatus(ReservationReschedule::STATUS_READY);
+            $this->em->persist($adjustment);
+            $this->em->flush();
+            $this->rescheduleQuoteService; // keep service wiring explicit
+            $connection->commit();
+            return new JsonResponse(['success' => true, 'status' => 'READY', 'rescheduleId' => $adjustment->getId()], 201);
+        } catch (\Throwable $e) {
+            if ($connection->isTransactionActive()) $connection->rollBack();
+            return new JsonResponse(['error' => $e->getMessage()], 422);
+        }
+    }
+
+    #[Route('/api/bookings/{id}/reschedule', name: 'reschedule_booking', methods: ['POST'])]
+    public function reschedule(int $id, Request $request): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return new JsonResponse(['error' => 'Authentification requise.'], 401);
+        }
+
+        $reservation = $this->em->getRepository(Reservation::class)->find($id);
+        if (!$reservation || $reservation->getUser()?->getId() !== $user->getId()) {
+            return new JsonResponse(['error' => 'Réservation introuvable.'], 404);
+        }
+
+        if ($reservation->getPaymentStatus() !== 'paye') {
+            return new JsonResponse(['error' => 'Seule une réservation payée peut être reportée.'], 422);
+        }
+        if ($reservation->getRescheduleCount() >= 1) {
+            return new JsonResponse(['error' => 'Cette réservation a déjà été reportée une fois.'], 409);
+        }
+
+        $fromTrip = $reservation->getTrip();
+        $fromDeparture = $fromTrip?->getDepartureTime();
+        if (!$fromTrip || !$fromDeparture) {
+            return new JsonResponse(['error' => 'Voyage actuel invalide.'], 422);
+        }
+
+        $hoursRemaining = ($fromDeparture->getTimestamp() - time()) / 3600;
+        if ($hoursRemaining < self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE) {
+            return new JsonResponse([
+                'error' => 'Le report doit être demandé au moins 24h avant le départ.',
+                'hoursRemaining' => max(0, round($hoursRemaining, 1)),
+            ], 422);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+        $newTripId = (int) ($data['trip_id'] ?? 0);
+        $requestedSeats = $data['seatNumbers'] ?? $data['seat_numbers'] ?? null;
+        if ($requestedSeats !== null && !is_array($requestedSeats)) {
+            return new JsonResponse(['error' => 'seatNumbers doit être un tableau.'], 422);
+        }
+        if ($requestedSeats !== null) {
+            $requestedSeats = array_values(array_unique(array_map('intval', $requestedSeats)));
+            if (count($requestedSeats) === 0) {
+                return new JsonResponse(['error' => 'La liste des sièges demandés ne peut pas être vide.'], 422);
+            }
+        }
+        if ($newTripId <= 0 || $newTripId === $fromTrip->getId()) {
+            return new JsonResponse(['error' => 'Veuillez sélectionner un nouveau voyage.'], 422);
+        }
+
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+
+        try {
+            /** @var Reservation|null $lockedReservation */
+            $lockedReservation = $this->em->getRepository(Reservation::class)->find($reservation->getId(), LockMode::PESSIMISTIC_WRITE);
+            if (!$lockedReservation) {
+                throw new \RuntimeException('Réservation introuvable.');
+            }
+            if ($lockedReservation->getRescheduleCount() >= 1) {
+                throw new \RuntimeException('Cette réservation a déjà été reportée une fois.');
+            }
+            /** @var Trip|null $lockedFromTrip */
+            $lockedFromTrip = $this->em->getRepository(Trip::class)->find($fromTrip->getId(), LockMode::PESSIMISTIC_WRITE);
+            /** @var Trip|null $newTrip */
+            $newTrip = $this->em->getRepository(Trip::class)->find($newTripId, LockMode::PESSIMISTIC_WRITE);
+
+            if (!$newTrip || $newTrip->getStatus() !== 'planifie') {
+                throw new \RuntimeException('Le nouveau voyage n’est plus disponible.');
+            }
+            if ($newTrip->getAgency()?->getStatus() !== 'active') {
+                throw new \RuntimeException('L’agence du nouveau voyage n’est pas active.');
+            }
+            if (!$newTrip->getDepartureTime() || $newTrip->getDepartureTime()->getTimestamp() <= time() || $newTrip->getDepartureTime()->getTimestamp() < time() + (24 * 3600)) {
+                throw new \RuntimeException('Le nouveau voyage doit également être prévu au moins 24h avant son départ.');
+            }
+            if ($newTrip->getAgency()?->getId() !== $fromTrip->getAgency()?->getId()) {
+                throw new \RuntimeException('Le report doit rester auprès de la même agence.');
+            }
+            if (bccomp((string) $newTrip->getPrice(), (string) $fromTrip->getPrice(), 2) !== 0) {
+                throw new \RuntimeException('Le tarif du nouveau voyage est différent. Le report automatique est impossible.');
+            }
+
+            $allTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+            $tickets = array_values(array_filter(
+                $allTickets,
+                static fn (Ticket $ticket) => in_array($ticket->getStatus(), ['en_attente', 'embarque'], true)
+            ));
+            $ticketCount = count($tickets);
+            if ($ticketCount < 1) {
+                throw new \RuntimeException('Cette réservation ne contient plus de billet actif à reporter.');
+            }
+            if ($requestedSeats !== null && count($requestedSeats) !== $ticketCount) {
+                throw new \RuntimeException(sprintf('Vous devez sélectionner exactement %d siège(s).', $ticketCount));
+            }
+
+            $capacity = $newTrip->getBus()?->getCapacity() ?? 0;
+
+            // seatsReserved est un cache. Pour le report, la vérité métier est
+            // la liste des billets encore actifs du voyage cible.
+            $occupied = $this->em->getRepository(Ticket::class)
+                ->createQueryBuilder('t')
+                ->join('t.reservation', 'r')
+                ->andWhere('r.trip = :trip')
+                ->andWhere('r.paymentStatus IN (:statuses)')
+                ->andWhere('t.status IN (:ticketStatuses)')
+                ->setParameter('trip', $newTrip)
+                ->setParameter('statuses', ['en_attente', 'paye'])
+                ->setParameter('ticketStatuses', ['en_attente', 'embarque'])
+                ->getQuery()->getResult();
+            $occupiedSeats = [];
+            foreach ($occupied as $occupiedTicket) {
+                if ($occupiedTicket->getSeatNumber() !== null) {
+                    $occupiedSeats[(int) $occupiedTicket->getSeatNumber()] = true;
+                }
+            }
+            if ($capacity < 1 || (count($occupiedSeats) + $ticketCount) > $capacity) {
+                throw new \RuntimeException('Le nouveau voyage ne dispose pas de suffisamment de places.');
+            }
+
+            // Allocation : le client peut demander des sièges précis ; sinon le
+            // moteur attribue les premiers sièges disponibles.
+            if ($requestedSeats !== null) {
+                foreach ($requestedSeats as $seat) {
+                    if ($seat < 1 || $seat > $capacity) {
+                        throw new \RuntimeException(sprintf('Le siège %d n’existe pas sur ce véhicule.', $seat));
+                    }
+                    if (isset($occupiedSeats[$seat])) {
+                        throw new \RuntimeException(sprintf('Le siège %d vient déjà d’être pris.', $seat));
+                    }
+                }
+                $freeSeats = $requestedSeats;
+            } else {
+                $freeSeats = [];
+                for ($seat = 1; $seat <= $capacity && count($freeSeats) < $ticketCount; ++$seat) {
+                    if (!isset($occupiedSeats[$seat])) {
+                        $freeSeats[] = $seat;
+                    }
+                }
+            }
+            if (count($freeSeats) !== $ticketCount || count(array_unique($freeSeats)) !== $ticketCount) {
+                throw new \RuntimeException('Impossible d’attribuer les places du nouveau voyage.');
+            }
+
+            foreach ($tickets as $index => $ticket) {
+                $ticket->setSeatNumber($freeSeats[$index]);
+                $this->em->persist($ticket);
+            }
+
+            if ($lockedFromTrip) {
+                // Recalcule le cache source après avoir déplacé les billets,
+                // au lieu de faire confiance à son ancienne valeur.
+                $remainingSource = $this->em->getRepository(Ticket::class)
+                    ->createQueryBuilder('t')
+                    ->select('COUNT(t.id)')
+                    ->join('t.reservation', 'r')
+                    ->andWhere('r.trip = :trip')
+                    ->andWhere('r.id != :reservation')
+                    ->andWhere('r.paymentStatus IN (:statuses)')
+                    ->andWhere('t.status IN (:ticketStatuses)')
+                    ->setParameter('trip', $lockedFromTrip)
+                    ->setParameter('reservation', $reservation->getId())
+                    ->setParameter('statuses', ['en_attente', 'paye'])
+                    ->setParameter('ticketStatuses', ['en_attente', 'embarque'])
+                    ->getQuery()->getSingleScalarResult();
+                $lockedFromTrip->setSeatsReserved((int) $remainingSource);
+                $this->em->persist($lockedFromTrip);
+            }
+            $newTrip->setSeatsReserved(count($occupiedSeats) + $ticketCount);
+            $this->em->persist($newTrip);
+
+            $history = (new ReservationReschedule())
+                ->setReservation($reservation)
+                ->setFromTrip($fromTrip)
+                ->setToTrip($newTrip);
+
+            $reservation->setTrip($newTrip)
+                ->incrementRescheduleCount()
+                ->setLastRescheduledAt(new \DateTimeImmutable());
+            $this->em->persist($history);
+            $this->em->persist($reservation);
+            $this->em->flush();
+            $this->auditLogger->record('BOOKING_RESCHEDULED', 'Reservation', (string) $reservation->getId(),
+                ['tripId' => $fromTrip->getId(), 'rescheduleCount' => $reservation->getRescheduleCount() - 1],
+                ['tripId' => $newTrip->getId(), 'rescheduleCount' => $reservation->getRescheduleCount()],
+                ['source' => 'booking.reschedule', 'fromTripId' => $fromTrip->getId(), 'toTripId' => $newTrip->getId()]
+            );
+            $this->em->flush();
+
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($user->getId())
+                ->setTitle('Voyage reporté')
+                ->setContent(sprintf(
+                    'Votre réservation #%d a été reportée vers le voyage du %s.',
+                    $reservation->getId(),
+                    $newTrip->getDepartureTime()?->format('d/m/Y à H:i') ?? ''
+                ))
+                ->setCategory('BOOKING')
+                ->setPayload([
+                    'reservationId' => $reservation->getId(),
+                    'fromTripId' => $fromTrip->getId(),
+                    'toTripId' => $newTrip->getId(),
+                    'seats' => $freeSeats,
+                ]);
+            $this->em->persist($notification);
+            $this->em->flush();
+
+            $connection->commit();
+
+            $this->notificationBroadcaster->broadcast($notification);
+
+            return new JsonResponse([
+                'success' => true,
+                'message' => 'Votre voyage a été reporté avec succès.',
+                'reservationId' => $reservation->getId(),
+                'tripId' => $newTrip->getId(),
+                'rescheduleCount' => $reservation->getRescheduleCount(),
+            ]);
+        } catch (\Throwable $e) {
+            $connection->rollBack();
+            return new JsonResponse(['error' => $e->getMessage()], 422);
+        }
+    }
+
     #[Route('/api/bookings/{id}/cancel', name: 'cancel_booking', methods: ['POST'])]
     public function cancel(int $id, Request $request): JsonResponse
     {
@@ -540,6 +976,15 @@ class BookingController extends AbstractController
         $connection->beginTransaction();
 
         try {
+            $lockedReservation = $this->em->getRepository(Reservation::class)->find($reservation->getId(), LockMode::PESSIMISTIC_WRITE);
+            if (!$lockedReservation) {
+                throw new \RuntimeException('Réservation introuvable.');
+            }
+            if (in_array($lockedReservation->getPaymentStatus(), ['annule', 'rembourse'], true)) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Cette réservation a déjà été annulée.'], 409);
+            }
+            $reservation = $lockedReservation;
             $lockedTrip = $this->em->getRepository(Trip::class)->find($trip->getId(), LockMode::PESSIMISTIC_WRITE);
 
             // 👈 IMPORTANT : capturé AVANT toute mutation — sert à décider plus
@@ -547,13 +992,13 @@ class BookingController extends AbstractController
             $wasPaid = $reservation->getPaymentStatus() === 'paye';
 
             // 1) Réservation -> remboursée / annulée
-            $reservation->setPaymentStatus('annule');
+            $this->stateTransitions->transitionReservationPayment($reservation, 'annule');
             $this->em->persist($reservation);
 
             // 2) Tous les billets liés -> annulés (invalides, plus scannables/validables)
             $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
             foreach ($tickets as $ticket) {
-                $ticket->setStatus('annule');
+                $this->stateTransitions->transitionTicket($ticket, 'annule');
                 // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
                 $ticket->setQrCodeToken(null);
                 $this->em->persist($ticket);
@@ -572,7 +1017,10 @@ class BookingController extends AbstractController
             $refundAmount = null;
 
             if ($wasPaid) {
-                $refundAmount = (float)$reservation->getTotalAmount() - WalletService::PLATFORM_FEE;
+                $refundAmount = bcsub((string) $reservation->getTotalAmount(), number_format(WalletService::PLATFORM_FEE, 2, '.', ''), 2);
+                if (bccomp($refundAmount, '0.00', 2) < 0) {
+                    $refundAmount = '0.00';
+                }
                 $refundLog = new PaymentLog();
                 $refundLog->setReservation($reservation);
                 $refundLog->setOperator($reservation->getPaymentMethod() ?? 'N/A');
@@ -744,6 +1192,7 @@ class BookingController extends AbstractController
             'seatNumber' => implode(', ', $seatNumbers),
             'totalPrice' => (float)$reservation->getTotalAmount(),
             'status' => $status,
+            'paymentExpiresAt' => $reservation->getPaymentExpiresAt()?->format(\DateTimeInterface::ATOM),
             'canCancel' => !$hasBoardedTicket && $status !== 'Annulé' && $status !== 'Expiré' && $trip && $trip->getDepartureTime() && (($trip->getDepartureTime()->getTimestamp() - (new \DateTime())->getTimestamp()) / 3600) > self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE,
             'bookingDate' => $departureTime ? $departureTime->format('c') : $reservation->getCreatedAt()?->format('c'),
             'trip' => $trip ? [

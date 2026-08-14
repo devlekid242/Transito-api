@@ -11,10 +11,7 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: AgentRepository::class)]
 #[ORM\Table(name: '`agents`')]
-#[ApiResource(
-    normalizationContext: ['groups' => ['agent:read']],
-    denormalizationContext: ['groups' => ['agent:write']]
-)]
+#[ApiResource(operations: [])]
 class Agent
 {
     #[ORM\Id]
@@ -102,6 +99,15 @@ class Agent
     public function getStatus(): string
     {
         return $this->status;
+    }
+
+    /**
+     * Permission métier utilisée par le contrôle d'embarquement.
+     * Seuls les agents actifs affectés au quai peuvent valider un billet.
+     */
+    public function canValidateTickets(): bool
+    {
+        return $this->status === 'active' && in_array($this->agentRole, ['agent_quai', 'admin_agence'], true);
     }
 
     public function setStatus(string $status): static

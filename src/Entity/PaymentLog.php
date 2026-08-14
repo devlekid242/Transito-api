@@ -18,8 +18,8 @@ use Symfony\Component\Serializer\Attribute\Groups;
     normalizationContext: ['groups' => ['payment:read']],
     // Généralement, on empêche l'écriture directe via l'API, ce sont nos webhooks internes qui créent les logs
     operations: [
-        new Get(),
-        new GetCollection(),
+        new Get(security: "is_granted('ROLE_ADMIN')"),
+        new GetCollection(security: "is_granted('ROLE_ADMIN')"),
         new Get(
             uriTemplate: '/payments/methods',
             controller: PaymentController::class . '::methods',
@@ -84,9 +84,17 @@ class PaymentLog
     #[Groups(['payment:read'])]
     private ?string $operator = null; // Ex: MTN, AIRTEL
 
-    #[ORM\Column(length: 100)]
+    #[ORM\Column(length: 100, unique: true)]
     #[Groups(['payment:read'])]
     private ?string $reference = null; // L'ID envoyé par l'opérateur GSM
+
+    #[ORM\Column(name: 'provider_reference', length: 150, nullable: true, unique: true)]
+    #[Groups(['payment:read'])]
+    private ?string $providerReference = null;
+
+    // Clé d'idempotence fournie par le client pour empêcher les doublons de paiement.
+    #[ORM\Column(name: 'idempotency_key', length: 100, nullable: true, unique: true)]
+    private ?string $idempotencyKey = null;
 
     #[ORM\Column(type: Types::DECIMAL, precision: 10, scale: 2)]
     #[Groups(['payment:read'])]
@@ -159,6 +167,28 @@ class PaymentLog
     public function setOperator(string $operator): static
     {
         $this->operator = $operator;
+        return $this;
+    }
+
+    public function getProviderReference(): ?string
+    {
+        return $this->providerReference;
+    }
+
+    public function getIdempotencyKey(): ?string
+    {
+        return $this->idempotencyKey;
+    }
+
+    public function setIdempotencyKey(?string $idempotencyKey): static
+    {
+        $this->idempotencyKey = $idempotencyKey;
+        return $this;
+    }
+
+    public function setProviderReference(?string $providerReference): static
+    {
+        $this->providerReference = $providerReference;
         return $this;
     }
 

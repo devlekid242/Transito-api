@@ -30,7 +30,8 @@ class PartnerFinanceController extends AbstractController
         private PaymentLogRepository $paymentLogRepository,
         private AgentRepository $agentRepository,
         private WalletService $walletService,
-        private TicketRepository $ticketRepository
+        private TicketRepository $ticketRepository,
+        private \App\Service\AdminNotificationService $adminNotificationService
     ) {}
 
     /**
@@ -46,7 +47,7 @@ class PartnerFinanceController extends AbstractController
     }
 
     #[Route('/api/statistics', name: 'api_statistics', methods: ['GET'])]
-    public function getPartnerStats(): JsonResponse
+    public function getPartnerStats(Request $request): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -56,6 +57,27 @@ class PartnerFinanceController extends AbstractController
         $agency = $this->getAgencyForUser($user);
         if (!$agency) {
             return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $idempotencyKey = trim((string) $request->headers->get('Idempotency-Key', ''));
+        if ($idempotencyKey !== '' && !preg_match('/^[A-Za-z0-9._:-]{8,100}$/', $idempotencyKey)) {
+            return new JsonResponse(['error' => 'Idempotency-Key invalide.'], 400);
+        }
+
+        if ($idempotencyKey !== '') {
+            $existingWithdrawal = $this->em->getRepository(WithdrawalRequest::class)->findOneBy(['idempotencyKey' => $idempotencyKey]);
+            if ($existingWithdrawal) {
+                if ($existingWithdrawal->getAgency()?->getId() !== $agency->getId()
+                    || $existingWithdrawal->getRequestedBy()?->getId() !== $user->getId()) {
+                    return new JsonResponse(['message' => 'Cette Idempotency-Key est déjà utilisée pour une autre opération.'], Response::HTTP_CONFLICT);
+                }
+                return new JsonResponse([
+                    'success' => true,
+                    'withdrawalId' => $existingWithdrawal->getId(),
+                    'status' => $existingWithdrawal->getStatus(),
+                    'idempotent' => true,
+                ], Response::HTTP_OK);
+            }
         }
 
         $wallet = $this->walletService->getOrCreateWallet($agency);
@@ -114,7 +136,7 @@ class PartnerFinanceController extends AbstractController
             }
         }
 
-        $grossRevenue = 0.0;      // Montant des réservations actuellement confirmées (payées, non annulées)
+        $grossRevenue = '0.00';      // Montant des réservations actuellement confirmées (payées, non annulées)
         $activeReservationIds = []; // Sert de périmètre cohérent pour le calcul de la commission plateforme
 
         $reservationsByStatus = [
@@ -133,7 +155,7 @@ class PartnerFinanceController extends AbstractController
             switch ($status) {
                 case 'paye':
                     $reservationsByStatus['confirmees']++;
-                    $grossRevenue += (float) $reservation->getTotalAmount();
+                    $grossRevenue = bcadd($grossRevenue, (string) $reservation->getTotalAmount(), 2);
                     $activeReservationIds[] = $id;
                     break;
 
@@ -161,13 +183,12 @@ class PartnerFinanceController extends AbstractController
             }
         }
 
-        $balanceAvailable = (float) $wallet->getAvailableBalance();
-        $balancePending = (float) $wallet->getReservedBalance();
+        
 
         // Montant actuellement dans available_balance mais qui sera débité dès
         // que l'admin traitera les remboursements en attente : à afficher comme
         // un solde "à risque", distinct du solde bloqué pour retrait (reserved).
-        $pendingRefundsAmount = (float) ($this->em->getRepository(PaymentLog::class)->createQueryBuilder('pl')
+        $pendingRefundsAmount = (string) ($this->em->getRepository(PaymentLog::class)->createQueryBuilder('pl')
             ->select('COALESCE(SUM(pl.amount), 0)')
             ->join('pl.reservation', 'r2')
             ->join('r2.trip', 't2')
@@ -177,7 +198,7 @@ class PartnerFinanceController extends AbstractController
             ->setParameter('pendingStatus', 'REFUND_PENDING')
             ->getQuery()
             ->getSingleScalarResult());
-        $pendingRefundsAmount = round($pendingRefundsAmount, 2);
+        $pendingRefundsAmount = bcadd((string) $pendingRefundsAmount, '0.00', 2);
 
         // La commission plateforme est calculée UNIQUEMENT sur le périmètre des
         // réservations actuellement actives (confirmées et non annulées) : c'est
@@ -186,9 +207,9 @@ class PartnerFinanceController extends AbstractController
         // commissions de réservations depuis annulées gonflerait artificiellement
         // les frais déduits par rapport au chiffre d'affaires réellement actif.
         if (empty($activeReservationIds)) {
-            $platformFees = 0.0;
+            $platformFees = '0.00';
         } else {
-            $platformFees = (float) $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
+            $platformFees = (string) $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
                 ->select('COALESCE(SUM(wt.amount), 0) as total')
                 ->join('wt.wallet', 'w')
                 ->where('wt.source = :source')
@@ -199,11 +220,11 @@ class PartnerFinanceController extends AbstractController
                 ->setParameter('platformType', Wallet::TYPE_PLATFORM)
                 ->getQuery()
                 ->getSingleScalarResult();
-            $platformFees = round($platformFees, 2);
+            $platformFees = bcadd((string) $platformFees, '0.00', 2);
         }
 
-        $grossRevenue = round($grossRevenue, 2);
-        $netRevenue = max(0.0, round($grossRevenue - $platformFees, 2));
+        $netRevenue = bcsub($grossRevenue, $platformFees, 2);
+        if (bccomp($netRevenue, '0.00', 2) < 0) { $netRevenue = '0.00'; }
 
         // Les billets annulés ('annule', produits par BookingController::cancel())
         // ne doivent compter ni dans le nombre de passagers "actifs" ni dans le
@@ -254,8 +275,8 @@ class PartnerFinanceController extends AbstractController
 
         $recentActivity = array_map(function (WalletTransaction $tx) {
             $signedAmount = $tx->getType() === WalletTransaction::TYPE_CREDIT
-                ? (float) $tx->getAmount()
-                : -1 * (float) $tx->getAmount();
+                ? (string) $tx->getAmount()
+                : bcsub('0.00', (string) $tx->getAmount(), 2);
 
             $status = $tx->getSource() === WalletTransaction::SOURCE_WITHDRAWAL_HOLD
                 ? 'En cours'
@@ -281,7 +302,7 @@ class PartnerFinanceController extends AbstractController
         $today = new \DateTimeImmutable();
         for ($i = 5; $i >= 0; $i--) {
             $date = $today->sub(new \DateInterval("P{$i}D"));
-            $dailyTotals[$date->format('Y-m-d')] = 0.0;
+            $dailyTotals[$date->format('Y-m-d')] = '0.00';
         }
 
         // Transactions par jour pour cette agence (uniquement les paiements confirmés)
@@ -301,7 +322,7 @@ class PartnerFinanceController extends AbstractController
 
         foreach ($transactionsByDay as $row) {
             if (isset($dailyTotals[$row['day']])) {
-                $dailyTotals[$row['day']] = (float) $row['total'];
+                $dailyTotals[$row['day']] = bcadd((string) $row['total'], '0.00', 2);
             }
         }
 
@@ -341,12 +362,13 @@ class PartnerFinanceController extends AbstractController
             // disponible peut encore inclure de l'argent "en sursis".
             'reservationsByStatus' => $reservationsByStatus,
             'balance' => [
-                'available' => round($balanceAvailable, 2),
-                'pending' => round($balancePending, 2),
-                // Part du solde disponible qui correspond à des remboursements
-                // demandés mais pas encore validés par l'admin : ce montant sera
-                // débité dès leur traitement, il ne doit pas être perçu comme
-                // définitivement acquis.
+                'available' => $wallet->getAvailableBalance(),
+                'blocked' => $wallet->getBlockedBalance(),
+                'reserved' => $wallet->getReservedBalance(),
+                'pending' => $wallet->getReservedBalance(),
+                'total' => $wallet->getTotalBalance(),
+                'totalEarned' => $wallet->getTotalEarned(),
+                'totalWithdrawn' => $wallet->getTotalWithdrawn(),
                 'atRisk' => $pendingRefundsAmount,
                 'pendingTransactions' => $pendingWithdrawals,
             ],
@@ -365,6 +387,34 @@ class PartnerFinanceController extends AbstractController
             'savedReports' => $savedReports,
         ], Response::HTTP_OK);
     }
+
+    // #[Route('/api/partner/revenue-chart', name: 'api_partner_revenue_chart', methods: ['GET'])]
+    // public function getRevenueChart(Request $request): JsonResponse
+    // {
+    //     $user = $this->getUser();
+    //     if (!$user instanceof User) {
+    //         return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+    //     }
+
+    //     $agency = $this->getAgencyForUser($user);
+    //     if (!$agency) {
+    //         return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+    //     }
+
+    //     $period = $request->query->get('period', '7j');
+    //     $validPeriods = ['7j', '30j', '90j'];
+    //     if (!in_array($period, $validPeriods)) {
+    //         return new JsonResponse(['message' => 'Période invalide.'], Response::HTTP_BAD_REQUEST);
+    //     }
+
+    //     // formater la période en nombre de jours pour la requête
+    //     $days = (int) substr($period, 0, -1);
+        
+    //     $today = new \DateTimeImmutable();
+    //     $startDate = $today->sub(new \DateInterval("P{$days}D"))->setTime(0, 0, 0);
+
+    // }
+
 
     #[Route('/api/reports', name: 'api_reports', methods: ['GET'])]
     public function listReports(): JsonResponse
@@ -493,11 +543,15 @@ class PartnerFinanceController extends AbstractController
             return new JsonResponse(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
 
-        $amount = isset($data['amount']) ? (float) $data['amount'] : null;
+        $amount = isset($data['amount']) && is_numeric($data['amount']) ? number_format((float) $data['amount'], 2, '.', '') : null;
         $method = $data['paymentMethod'] ?? $data['method'] ?? null;
         $notes = $data['notes'] ?? null;
+        $idempotencyKey = trim((string) $request->headers->get('Idempotency-Key', ''));
+        if ($idempotencyKey !== '' && !preg_match('/^[A-Za-z0-9._:-]{8,100}$/', $idempotencyKey)) {
+            return new JsonResponse(['message' => 'Idempotency-Key invalide.'], Response::HTTP_BAD_REQUEST);
+        }
 
-        if (!$amount || $amount <= 0) {
+        if ($amount === null || bccomp($amount, '0.00', 2) <= 0) {
             return new JsonResponse(['message' => 'Montant invalide.'], Response::HTTP_BAD_REQUEST);
         }
         if (!$method) {
@@ -509,7 +563,7 @@ class PartnerFinanceController extends AbstractController
         $pendingRefundAmount = $this->getPendingRefundAmount($agency);
         $effectiveAvailable = max(0.0, $available - $pendingRefundAmount);
 
-        if ($amount > $effectiveAvailable) {
+        if (bccomp($amount, number_format($effectiveAvailable, 2, '.', ''), 2) === 1) {
             return new JsonResponse([
                 'message' => 'Retrait bloqué : votre solde disponible est déjà engagé par des remboursements en attente de réservation.',
                 'available' => $available,
@@ -521,31 +575,52 @@ class PartnerFinanceController extends AbstractController
         $withdrawal = new WithdrawalRequest();
         $withdrawal->setAgency($agency);
         $withdrawal->setRequestedBy($user);
+        $withdrawal->setIdempotencyKey($idempotencyKey !== '' ? $idempotencyKey : null);
         $withdrawal->setAmount((string) $amount);
         // NB : $method était auparavant tronqué à son premier caractère ($method[0]) — corrigé ici.
         $withdrawal->setMethod((string) $method);
         $withdrawal->setNotes($notes);
         $withdrawal->setStatus('pending');
 
-        $this->em->persist($withdrawal);
-        $this->em->flush();
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
 
         try {
-            // Bloque immédiatement les fonds : tant que l'admin n'a pas statué, ce montant
-            // n'est plus disponible pour une autre demande de retrait de la même agence.
-            $this->walletService->reserveForWithdrawal($withdrawal);
-        } catch (\RuntimeException $e) {
-            // Cas rare de concurrence (deux demandes envoyées au même instant) :
-            // on annule la demande plutôt que de laisser un retrait non couvert par le solde.
-            $this->em->remove($withdrawal);
+            // Verrouille le wallet pendant la vérification + réservation afin que
+            // deux demandes concurrentes ne puissent consommer le même disponible.
+            $lockedWallet = $this->em->getRepository(Wallet::class)
+                ->find($wallet->getId(), \Doctrine\DBAL\LockMode::PESSIMISTIC_WRITE);
+
+            if (!$lockedWallet) {
+                throw new \RuntimeException('Portefeuille agence introuvable.');
+            }
+
+            $wallet = $lockedWallet;
+            $available = $wallet->getAvailableBalance();
+            $effectiveAvailable = bcsub($available, number_format($pendingRefundAmount, 2, '.', ''), 2);
+            if (bccomp($amount, $effectiveAvailable, 2) === 1) {
+                throw new \RuntimeException('Solde disponible insuffisant après prise en compte des remboursements en attente.');
+            }
+
+            $this->em->persist($withdrawal);
             $this->em->flush();
+            $this->walletService->reserveForWithdrawal($withdrawal);
+            $this->em->flush();
+            $connection->commit();
+        } catch (\Throwable $e) {
+            $connection->rollBack();
             return new JsonResponse([
                 'message' => $e->getMessage(),
                 'available' => (float) $wallet->getAvailableBalance(),
             ], Response::HTTP_CONFLICT);
         }
 
-        $this->em->flush();
+        $this->adminNotificationService->notifyEvent(
+            'Nouvelle demande de retrait',
+            sprintf('L’agence %s demande un retrait de %s FCFA.', $agency->getName(), $amount),
+            'FINANCE',
+            ['type' => 'withdrawal', 'withdrawalId' => $withdrawal->getId(), 'status' => 'pending', 'agencyId' => $agency->getId()]
+        );
 
         return new JsonResponse([
             'success' => true,

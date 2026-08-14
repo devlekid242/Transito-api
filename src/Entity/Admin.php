@@ -11,10 +11,7 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity(repositoryClass: AdminRepository::class)]
 #[ORM\Table(name: '`admins`')]
-#[ApiResource(
-    normalizationContext: ['groups' => ['admin:read']],
-    denormalizationContext: ['groups' => ['admin:write']]
-)]
+#[ApiResource(operations: [])]
 class Admin
 {
     #[ORM\Id]

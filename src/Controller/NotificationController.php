@@ -6,8 +6,10 @@ use App\Entity\Notification;
 use App\Entity\User;
 use App\Repository\NotificationRepository;
 use App\Repository\AgentRepository;
+use App\Repository\NotificationUserStateRepository;
 use App\Service\NotificationBroadcastService;
 use App\Service\NotificationNormalizer;
+use App\Security\AdminRoleVoter;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -54,35 +56,15 @@ class NotificationController extends AbstractController
         NotificationRepository $notificationRepository,
         User $user,
         bool $unreadOnly,
-    ) {
-        $agencyId = $this->resolveAgencyId($user);
-
-        $qb = $notificationRepository->createQueryBuilder('n')
-            ->where('n.recipientType = :userType AND n.recipientId = :userId')
-            ->setParameter('userType', 'user')
-            ->setParameter('userId', $user->getId());
-
-        if ($agencyId !== null) {
-            $qb->orWhere('n.recipientType = :agencyType AND n.recipientId = :agencyId')
-                ->setParameter('agencyType', 'agency_all')
-                ->setParameter('agencyId', $agencyId);
-        }
-
-        if ($unreadOnly) {
-            // andWhere ici s'applique à l'ensemble du OR grâce aux parenthèses
-            // implicites de Doctrine sur where()/orWhere() enchaînés — on
-            // vérifie qu'aucune des deux branches n'échappe au filtre isRead.
-            $qb->andWhere('n.isRead = 0');
-        }
-
-        return $qb->orderBy('n.createdAt', 'DESC')->getQuery()->getResult();
+    ): array
+    {
+        return $notificationRepository->findVisibleForUser(
+            $user,
+            $this->resolveAgencyId($user),
+            $unreadOnly,
+        );
     }
 
-    /**
-     * 👈 NOUVEAU : un agent peut agir sur une notification si c'est la
-     * sienne en propre, OU si c'est une notification `agency_all` de sa
-     * propre agence (pas celle d'une autre agence).
-     */
     private function canAccessNotification(Notification $notification, User $user): bool
     {
         if ($notification->getRecipientType() === 'user') {
@@ -90,15 +72,19 @@ class NotificationController extends AbstractController
         }
 
         if ($notification->getRecipientType() === 'agency_all') {
+            $recipientId = $notification->getRecipientId();
+            if ($recipientId === null) {
+                return true;
+            }
             $agencyId = $this->resolveAgencyId($user);
-            return $agencyId !== null && $notification->getRecipientId() === $agencyId;
+            return $agencyId !== null && $recipientId === $agencyId;
         }
 
         return false;
     }
 
     #[Route('', name: 'api_notifications_list', methods: ['GET'])]
-    public function index(NotificationRepository $notificationRepository): JsonResponse
+    public function index(NotificationRepository $notificationRepository, NotificationUserStateRepository $stateRepository): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) {
@@ -109,7 +95,10 @@ class NotificationController extends AbstractController
         // personnelles (remplacées par les seules notifications d'agence).
         $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, false);
 
-        $data = array_map(fn($notif) => $this->normalizer->normalize($notif), $notifications);
+        $data = array_map(function (Notification $notif) use ($stateRepository, $user) {
+            $state = $stateRepository->findForUser($notif, $user);
+            return $this->normalizer->normalizeForUser($notif, $state?->isRead() ?? ($notif->getRecipientType() === 'user' && $notif->getIsRead() === 1));
+        }, $notifications);
         return $this->json($data);
     }
 
@@ -164,6 +153,9 @@ class NotificationController extends AbstractController
                 }
             } else {
                 $agencyRecipientId = $requestedRecipientId;
+                if ($agencyRecipientId === null && !$this->isGranted(AdminRoleVoter::SUPER)) {
+                    return $this->json(['message' => 'Seul le Super Admin peut diffuser une notification globale.'], Response::HTTP_FORBIDDEN);
+                }
             }
         }
 
@@ -200,14 +192,14 @@ class NotificationController extends AbstractController
     }
 
     #[Route('/unread', name: 'api_notifications_unread', methods: ['GET'])]
-    public function unread(NotificationRepository $notificationRepository): JsonResponse
+    public function unread(NotificationRepository $notificationRepository, NotificationUserStateRepository $stateRepository): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
 
         $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
-        $data = array_map(fn($notif) => $this->normalizer->normalize($notif), $notifications);
+        $data = array_map(fn(Notification $notif) => $this->normalizer->normalizeForUser($notif, true), $notifications);
         return $this->json($data);
     }
 
@@ -223,7 +215,7 @@ class NotificationController extends AbstractController
     }
 
     #[Route('/{id}/read', name: 'api_notifications_mark_read', methods: ['PATCH'])]
-    public function markRead(int $id, NotificationRepository $notificationRepository, EntityManagerInterface $em): JsonResponse
+    public function markRead(int $id, NotificationRepository $notificationRepository, NotificationUserStateRepository $stateRepository, EntityManagerInterface $em): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
@@ -237,19 +229,16 @@ class NotificationController extends AbstractController
             return $this->json(['message' => 'Notification introuvable.'], Response::HTTP_NOT_FOUND);
         }
 
-        // ⚠️ Rappel d'architecture : `isRead` est une colonne partagée sur
-        // une notification 'agency_all'. La marquer lue ici la fait
-        // disparaître de la liste "non lues" pour TOUS les agents de
-        // l'agence, pas seulement celui qui vient de cliquer. Un vrai suivi
-        // par-agent demanderait une table de jointure dédiée.
-        $notification->setIsRead(1);
+        $state = $stateRepository->getState($notification, $user);
+        $state->markRead();
+        $em->persist($state);
         $em->flush();
 
-        return $this->json($this->normalizer->normalize($notification));
+        return $this->json($this->normalizer->normalizeForUser($notification, true));
     }
 
     #[Route('/mark-all-read', name: 'api_notifications_mark_all_read', methods: ['PATCH'])]
-    public function markAllRead(NotificationRepository $notificationRepository, EntityManagerInterface $em): JsonResponse
+    public function markAllRead(NotificationRepository $notificationRepository, NotificationUserStateRepository $stateRepository, EntityManagerInterface $em): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
@@ -257,7 +246,9 @@ class NotificationController extends AbstractController
         $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
         foreach ($notifications as $notification) {
-            $notification->setIsRead(1);
+            $state = $stateRepository->getState($notification, $user);
+            $state->markRead();
+            $em->persist($state);
         }
         $em->flush();
 
@@ -271,7 +262,7 @@ class NotificationController extends AbstractController
      * est utilisé quelque part dans l'UI).
      */
     #[Route('/{id}', name: 'api_notifications_delete', methods: ['DELETE'])]
-    public function delete(int $id, NotificationRepository $notificationRepository, EntityManagerInterface $em): JsonResponse
+    public function delete(int $id, NotificationRepository $notificationRepository, NotificationUserStateRepository $stateRepository, EntityManagerInterface $em): JsonResponse
     {
         $user = $this->getUser();
         if (!$user instanceof User) return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
@@ -281,19 +272,12 @@ class NotificationController extends AbstractController
             return $this->json(['message' => 'Notification introuvable.'], Response::HTTP_NOT_FOUND);
         }
 
-        // 👈 NOUVEAU : supprimer une notification 'agency_all' l'efface pour
-        // TOUTE l'agence (ressource partagée, contrairement à une notif
-        // 'user' qui n'appartient qu'à soi). On réserve donc cette action
-        // destructive à l'admin_agence — un agent_quai peut la marquer lue
-        // (voir markRead()) mais pas la supprimer pour tout le monde.
-        if ($notification->getRecipientType() === 'agency_all') {
-            $agent = $this->agentRepository->findOneBy(['user' => $user]);
-            if (!$agent || $agent->getAgentRole() !== 'admin_agence') {
-                return $this->json(['message' => "Seul l'administrateur de l'agence peut supprimer cette notification."], Response::HTTP_FORBIDDEN);
-            }
-        }
-
-        $em->remove($notification);
+        // Une notification partagée ne doit jamais être supprimée pour
+        // tous les destinataires parce qu'un seul utilisateur la masque.
+        // On crée donc une tombstone personnelle.
+        $state = $stateRepository->getState($notification, $user);
+        $state->markDeleted();
+        $em->persist($state);
         $em->flush();
 
         return $this->json(['deleted' => true]);

@@ -6,8 +6,11 @@ use App\Entity\Agent;
 use App\Entity\Notification;
 use App\Entity\Ticket;
 use Doctrine\ORM\EntityManagerInterface;
+use App\Service\DomainStateTransitionService;
+use App\Service\AuditLogger;
 use App\Service\NotificationBroadcastService;
 use App\Service\StatusMapperService;
+use App\Service\WalletService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -19,6 +22,9 @@ class TicketController extends AbstractController
         private EntityManagerInterface $em,
         private NotificationBroadcastService $notificationBroadcaster,
         private StatusMapperService $statusMapperService,
+        private WalletService $walletService,
+        private DomainStateTransitionService $stateTransitions,
+        private AuditLogger $auditLogger,
     ) {}
 
     /**
@@ -69,7 +75,25 @@ class TicketController extends AbstractController
             return $deny;
         }
 
+        // Verrouille le billet avant toute décision d'embarquement : deux agents
+        // ne peuvent pas valider simultanément le même billet.
+        $this->em->beginTransaction();
+        try {
+            $ticket = $this->em->getRepository(Ticket::class)->createQueryBuilder('t')
+                ->andWhere('t.id = :id')
+                ->setParameter('id', $ticket->getId())
+                ->getQuery()
+                ->setLockMode(\Doctrine\ORM\LockMode::PESSIMISTIC_WRITE)
+                ->getSingleResult();
+        } catch (\Throwable $e) {
+            if ($this->em->getConnection()->isTransactionActive()) {
+                $this->em->rollback();
+            }
+            throw $e;
+        }
+
         if ($ticket->getStatus() === 'annule') {
+            $this->em->rollback();
             return new JsonResponse([
                 'success' => false,
                 'boardingStatus' => 'CANCELLED',
@@ -77,6 +101,7 @@ class TicketController extends AbstractController
             ], 400);
         }
         if ($ticket->getStatus() === 'embarque') {
+            $this->em->rollback();
             return new JsonResponse(array_merge($this->mapTicket($ticket), [
                 'success' => false,
                 'boardingStatus' => 'ALREADY_BOARDED',
@@ -88,13 +113,26 @@ class TicketController extends AbstractController
         // n'importe quel jour. Un billet ne doit être embarquable que le jour
         // exact du voyage (ni avant, ni après).
         if ($deny = $this->denyIfNotTravelDay($ticket)) {
+            $this->em->rollback();
             return $deny;
         }
 
-        $ticket->setStatus('embarque');
+        $this->stateTransitions->transitionTicket($ticket, 'embarque');
         $ticket->setValidatedByAgent($agent);
         $ticket->setValidatedAt(new \DateTime());
         $this->em->persist($ticket);
+
+        // Déblocage financier : transfert de la valeur du billet du Solde Bloqué vers le Solde Disponible
+        try {
+            $this->walletService->processTicketBoarding($ticket);
+        } catch (\Throwable $e) {
+            $this->em->rollback();
+            return new JsonResponse([
+                'success' => false,
+                'boardingStatus' => 'FINANCIAL_ERROR',
+                'message' => 'Impossible de valider ce billet : le solde financier associé est incohérent.',
+            ], 409);
+        }
 
         // Le passager ET l'agence/partenaire doivent être notifiés : jusqu'ici
         // seul le passager recevait une notification, le partenaire n'avait
@@ -102,6 +140,13 @@ class TicketController extends AbstractController
         $passengerNotification = $this->notifyPassengerOfBoarding($ticket);
         $agencyNotification = $this->notifyAgencyOfBoarding($ticket, $agent);
         $this->em->flush();
+        $this->auditLogger->record('TICKET_BOARDED', 'Ticket', (string) $ticket->getId(),
+            ['status' => 'en_attente'],
+            ['status' => $ticket->getStatus()],
+            ['source' => 'ticket.validate', 'tripId' => $ticket->getReservation()?->getTrip()?->getId(), 'agentId' => $agent->getId(), 'settlementAmount' => $ticket->getSettlementAmount()]
+        );
+        $this->em->flush();
+        $this->em->commit();
         if ($passengerNotification) {
             $this->notificationBroadcaster->broadcast($passengerNotification);
         }
@@ -129,33 +174,64 @@ class TicketController extends AbstractController
             return $agent;
         }
 
-        $ticket = $this->em->getRepository(Ticket::class)->find($id);
+        $this->em->beginTransaction();
+        $ticket = $this->em->getRepository(Ticket::class)->createQueryBuilder('t')
+            ->andWhere('t.id = :id')
+            ->setParameter('id', $id)
+            ->getQuery()
+            ->setLockMode(\Doctrine\ORM\LockMode::PESSIMISTIC_WRITE)
+            ->getOneOrNullResult();
         if (!$ticket) {
+            $this->em->rollback();
             return new JsonResponse(['error' => 'Billet introuvable.'], 404);
         }
 
         if ($deny = $this->denyIfOutsideAgentAgency($ticket, $agent)) {
+            $this->em->rollback();
             return $deny;
         }
 
         if ($ticket->getStatus() === 'annule') {
+             $this->em->rollback();
             return new JsonResponse(['error' => "Ce billet a été annulé et n'est plus valide."], 400);
         }
         if ($ticket->getStatus() === 'embarque') {
+             $this->em->rollback();
             return new JsonResponse(['error' => 'Ce billet a déjà été validé.'], 400);
         }
 
         if ($deny = $this->denyIfNotTravelDay($ticket)) {
+            $this->em->rollback();
             return $deny;
         }
 
-        $ticket->setStatus('embarque');
+        $this->stateTransitions->transitionTicket($ticket, 'embarque');
         $ticket->setValidatedByAgent($agent);
         $ticket->setValidatedAt(new \DateTime());
+        $this->em->persist($ticket);
+
+        // Déblocage financier : transfert de la valeur du billet du Solde Bloqué vers le Solde Disponible
+        try {
+            $this->walletService->processTicketBoarding($ticket);
+        } catch (\Throwable $e) {
+            $this->em->rollback();
+            return new JsonResponse([
+                'success' => false,
+                'boardingStatus' => 'FINANCIAL_ERROR',
+                'message' => 'Impossible de valider ce billet : le solde financier associé est incohérent.',
+            ], 409);
+        }
 
         $passengerNotification = $this->notifyPassengerOfBoarding($ticket);
         $agencyNotification = $this->notifyAgencyOfBoarding($ticket, $agent);
         $this->em->flush();
+        $this->auditLogger->record('TICKET_BOARDED', 'Ticket', (string) $ticket->getId(),
+            ['status' => 'en_attente'],
+            ['status' => $ticket->getStatus()],
+            ['source' => 'ticket.validate', 'tripId' => $ticket->getReservation()?->getTrip()?->getId(), 'agentId' => $agent->getId(), 'settlementAmount' => $ticket->getSettlementAmount()]
+        );
+        $this->em->flush();
+        $this->em->commit();
         if ($passengerNotification) {
             $this->notificationBroadcaster->broadcast($passengerNotification);
         }
@@ -324,7 +400,10 @@ class TicketController extends AbstractController
         }
 
         if ($ticketCode !== '') {
-            $id = (int) preg_replace('/\D/', '', $ticketCode);
+            if (!preg_match('/^TKT-(\d+)$/i', $ticketCode, $matches)) {
+                return null;
+            }
+            $id = (int) $matches[1];
             if ($id > 0) {
                 return $repo->find($id);
             }
@@ -400,7 +479,7 @@ class TicketController extends AbstractController
         $trip = $ticket->getReservation()?->getTrip();
 
         $notification = new Notification();
-        $notification->setRecipientType('agency')
+        $notification->setRecipientType('agency_all')
             ->setRecipientId($agency->getId())
             ->setTitle('Billet validé par un agent')
             ->setContent(sprintf(

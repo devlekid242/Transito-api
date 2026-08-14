@@ -5,6 +5,7 @@ namespace App\Entity;
 use Doctrine\ORM\Mapping as ORM;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
+use Doctrine\DBAL\Types\Types;
 use Symfony\Component\Validator\Constraints as Assert;
 
 /**
@@ -66,8 +67,40 @@ class SupportTicket
     #[ORM\OneToMany(mappedBy: 'ticket', targetEntity: SupportResponse::class, cascade: ['persist', 'remove'])]
     private Collection $responses;
 
-    #[ORM\Column(name: 'created_at')]
+    #[ORM\Column(name: 'created_at' , type: Types::DATETIME_MUTABLE)]
     private ?\DateTimeInterface $createdAt = null;
+
+    #[ORM\Column(name: 'updated_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $updatedAt = null;
+
+    #[ORM\Column(name: 'closed_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $closedAt = null;
+
+
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'assigned_to_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?User $assignedTo = null;
+
+    #[ORM\ManyToOne(targetEntity: Reservation::class)]
+    #[ORM\JoinColumn(name: 'reservation_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?Reservation $reservation = null;
+
+    #[ORM\ManyToOne(targetEntity: Trip::class)]
+    #[ORM\JoinColumn(name: 'trip_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?Trip $trip = null;
+
+    #[ORM\ManyToOne(targetEntity: Agency::class)]
+    #[ORM\JoinColumn(name: 'agency_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?Agency $agency = null;
+
+    #[ORM\Column(name: 'first_response_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $firstResponseAt = null;
+
+    #[ORM\Column(name: 'sla_due_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $slaDueAt = null;
+
+    #[ORM\Column(name: 'closed_reason', type: Types::TEXT, nullable: true)]
+    private ?string $closedReason = null;
 
     public function __construct()
     {
@@ -173,5 +206,115 @@ class SupportTicket
     public function getCreatedAt(): ?\DateTimeInterface
     {
         return $this->createdAt;
+    }
+
+    public function getUpdatedAt(): ?\DateTimeInterface
+    {
+        return $this->updatedAt;
+    }
+
+    public function touch(): static
+    {
+        $this->updatedAt = new \DateTime();
+        return $this;
+    }
+
+    public function getClosedAt(): ?\DateTimeInterface
+    {
+        return $this->closedAt;
+    }
+
+
+    public function getAssignedTo(): ?User
+    {
+        return $this->assignedTo;
+    }
+
+    public function setAssignedTo(?User $assignedTo): static
+    {
+        $this->assignedTo = $assignedTo;
+        return $this;
+    }
+
+    public function getReservation(): ?Reservation
+    {
+        return $this->reservation;
+    }
+
+    public function setReservation(?Reservation $reservation): static
+    {
+        $this->reservation = $reservation;
+        return $this;
+    }
+
+    public function getTrip(): ?Trip
+    {
+        return $this->trip;
+    }
+
+    public function setTrip(?Trip $trip): static
+    {
+        $this->trip = $trip;
+        return $this;
+    }
+
+    public function getAgency(): ?Agency
+    {
+        return $this->agency;
+    }
+
+    public function setAgency(?Agency $agency): static
+    {
+        $this->agency = $agency;
+        return $this;
+    }
+
+    public function getFirstResponseAt(): ?\DateTimeInterface
+    {
+        return $this->firstResponseAt;
+    }
+
+    public function markFirstResponse(): static
+    {
+        $this->firstResponseAt ??= new \DateTime();
+        return $this;
+    }
+
+    public function getSlaDueAt(): ?\DateTimeInterface
+    {
+        return $this->slaDueAt;
+    }
+
+    public function setSlaDueAt(?\DateTimeInterface $slaDueAt): static
+    {
+        $this->slaDueAt = $slaDueAt;
+        return $this;
+    }
+
+    public function getClosedReason(): ?string
+    {
+        return $this->closedReason;
+    }
+
+    public function setClosedReason(?string $closedReason): static
+    {
+        $this->closedReason = $closedReason;
+        return $this;
+    }
+
+    public function isSlaBreached(?\DateTimeInterface $now = null): bool
+    {
+        if ($this->status === 'closed' || $this->firstResponseAt !== null || $this->slaDueAt === null) {
+            return false;
+        }
+        return ($now ?? new \DateTime()) > $this->slaDueAt;
+    }
+
+    public function close(): static
+    {
+        $this->status = 'closed';
+        $this->closedAt = new \DateTime();
+        $this->updatedAt = new \DateTime();
+        return $this;
     }
 }

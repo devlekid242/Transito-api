@@ -4,6 +4,7 @@ namespace App\Service;
 
 use App\Entity\Notification;
 use App\Entity\User;
+use App\Entity\Admin;
 use Doctrine\ORM\EntityManagerInterface;
 
 class AdminNotificationService
@@ -59,10 +60,15 @@ class AdminNotificationService
      */
     private function getAdminUsers(): array
     {
+        // La source de vérité du rôle administrateur est l'entité Admin :
+        // User::getRoles() dérive ROLE_ADMIN à partir de Admin et ce rôle n'est
+        // pas nécessairement présent dans le JSON users.roles.
         return $this->em->createQueryBuilder()
-            ->select('u')
+            ->select('DISTINCT u')
             ->from(User::class, 'u')
-            ->where('u.roles LIKE :role')
+            ->leftJoin(Admin::class, 'a', 'WITH', 'a.user = u')
+            ->where('(a.id IS NOT NULL AND a.status = :active) OR u.roles LIKE :role')
+            ->setParameter('active', 'active')
             ->setParameter('role', '%"ROLE_ADMIN"%')
             ->getQuery()
             ->getResult();

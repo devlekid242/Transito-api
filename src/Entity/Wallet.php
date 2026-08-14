@@ -23,7 +23,7 @@ use Symfony\Component\Serializer\Attribute\Groups;
 #[ApiResource(
     normalizationContext: ['groups' => ['wallet:read']],
     operations: [
-        new Get(),
+        new Get(security: "is_granted('ROLE_ADMIN')"),
     ]
 )]
 class Wallet
@@ -50,6 +50,11 @@ class Wallet
     #[ORM\Column(name: 'available_balance', type: Types::DECIMAL, precision: 12, scale: 2, options: ['default' => '0.00'])]
     #[Groups(['wallet:read'])]
     private string $availableBalance = '0.00';
+
+    // Fonds bloqués en attente d'embarquement des passagers (réservation payée mais billets non encore validés)
+    #[ORM\Column(name: 'blocked_balance', type: Types::DECIMAL, precision: 12, scale: 2, options: ['default' => '0.00'])]
+    #[Groups(['wallet:read'])]
+    private string $blockedBalance = '0.00';
 
     // Fonds bloqués le temps qu'une demande de retrait en cours soit traitée par l'admin
     #[ORM\Column(name: 'reserved_balance', type: Types::DECIMAL, precision: 12, scale: 2, options: ['default' => '0.00'])]
@@ -162,6 +167,17 @@ class Wallet
         return $this;
     }
 
+    public function getBlockedBalance(): string
+    {
+        return $this->blockedBalance;
+    }
+
+    public function setBlockedBalance(string $blockedBalance): static
+    {
+        $this->blockedBalance = $blockedBalance;
+        return $this;
+    }
+
     public function getReservedBalance(): string
     {
         return $this->reservedBalance;
@@ -229,10 +245,19 @@ class Wallet
     }
 
     /**
-     * Get the total balance (available + reserved).
-     * This is the net balance that the agency can potentially access.
+     * Get the total balance (available + reserved + blocked).
+     * Total value of all agency funds currently managed in the system.
      */
     public function getTotalBalance(): string
+    {
+        $sum = bcadd($this->availableBalance, $this->reservedBalance, 2);
+        return bcadd($sum, $this->blockedBalance, 2);
+    }
+
+    /**
+     * Get the net accessible balance (available + reserved).
+     */
+    public function getNetAccessibleBalance(): string
     {
         return bcadd($this->availableBalance, $this->reservedBalance, 2);
     }

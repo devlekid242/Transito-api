@@ -28,8 +28,8 @@ use App\Controller\AgencyController;
     operations: [
         new GetCollection(), // Pour l'infinite scroll de l'application mobile
         new Get(),
-        new Post(),          // Inscription d'une nouvelle agence via le back-office SuperAdmin
-        new Delete(),
+        new Post(security: "is_granted('ROLE_ADMIN')"),          // Création interne agence
+        new Delete(security: "is_granted('ROLE_ADMIN')"),
         new GetCollection(
             uriTemplate: '/agencies/active',
             controller: AgencyController::class . '::getActiveAgencies',
@@ -38,7 +38,8 @@ use App\Controller\AgencyController;
         new Post(
             uriTemplate: '/agencies/register',
             controller: AgencyController::class . '::registerAgency',
-            name: 'api_agencies_register'
+            name: 'api_agencies_register',
+            security: 'PUBLIC_ACCESS'
         )
     ]
 )]

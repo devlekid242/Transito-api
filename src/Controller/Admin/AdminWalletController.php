@@ -2,6 +2,8 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+
 use App\Entity\Agency;
 use App\Entity\User;
 use App\Entity\Wallet;
@@ -31,6 +33,7 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * l'API. Il n'y avait auparavant aucune vérification de rôle.
  */
 #[Route('/api/admin/wallets')]
+#[IsGranted(AdminRoleVoter::FINANCE)]
 #[IsGranted('ROLE_ADMIN')]
 class AdminWalletController extends AbstractController
 {
@@ -44,10 +47,8 @@ class AdminWalletController extends AbstractController
         private TicketRepository $ticketRepository,
         private WithdrawalRequestRepository $withdrawalRequestRepository,
     ) {
-        // Inject repositories into wallet service for advanced features
-        $this->walletService->setRefundRequestRepository($this->refundRequestRepository);
-        $this->walletService->setTicketRepository($this->ticketRepository);
-        $this->walletService->setWithdrawalRequestRepository($this->withdrawalRequestRepository);
+        // Symfony autowires repositories directly into WalletService; 
+        // no manual setters needed here.
     }
 
     /**
@@ -84,15 +85,12 @@ class AdminWalletController extends AbstractController
         }
 
         // Calculate total blocked balance across all wallets
-        $totalBlockedBalance = $this->walletRepository->getTotalBlockedBalance(
-            $this->refundRequestRepository,
-            $this->ticketRepository
-        );
+        $totalBlockedBalance = (float) $this->walletRepository->getTotalBlockedBalance();
 
         // Calculate totals
         $totalAvailable = array_sum(array_column($walletsWithSummary, 'available'));
         $totalReserved = array_sum(array_column($walletsWithSummary, 'reserved'));
-        $totalBalance = $totalAvailable + $totalReserved;
+        $totalBalance = $totalAvailable + $totalReserved + $totalBlockedBalance;
 
         // Pagination
         $total = count($walletsWithSummary);

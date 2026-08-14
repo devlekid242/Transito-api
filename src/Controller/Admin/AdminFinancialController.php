@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Agency;
 use App\Entity\Reservation;
 use App\Entity\WithdrawalRequest;
@@ -19,6 +22,7 @@ use App\Repository\RefundRequestRepository;
 use App\Repository\TicketRepository;
 use App\Repository\UserRepository;
 use App\Service\WalletService;
+use App\Service\FinancialReconciliationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -32,6 +36,7 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Provides endpoints for revenue analysis and financial statistics with date-range filtering.
  */
 #[Route('/api/admin/financial')]
+#[IsGranted(AdminRoleVoter::FINANCE)]
 class AdminFinancialController extends AbstractController
 {
     public function __construct(
@@ -46,12 +51,149 @@ class AdminFinancialController extends AbstractController
         private RefundRequestRepository $refundRequestRepository,
         private TicketRepository $ticketRepository,
         private UserRepository $userRepository,
+        private FinancialReconciliationService $financialReconciliationService,
     ) {}
 
     /**
      * Get platform-specific revenue analysis metrics.
      * Scope: Platform application fees, service charges, and platform net earnings.
      */
+    /**
+     * Read-only integrity check of all platform and agency wallets against
+     * their ledger snapshots. This endpoint never mutates financial data.
+     */
+    #[Route('/reconciliation', name: 'api_admin_financial_reconciliation', methods: ['GET'])]
+    public function reconciliation(): JsonResponse
+    {
+        $this->denyAccessUnlessGranted(AdminRoleVoter::FINANCE);
+
+        return $this->json([
+            'success' => true,
+            'data' => $this->financialReconciliationService->reconcile(),
+        ]);
+    }
+
+    /**
+     * Reconcile a single agency wallet. Useful from the agency detail page
+     * before approving a withdrawal or refund.
+     */
+    #[Route('/reconciliation/agency/{id}', name: 'api_admin_financial_reconciliation_agency', methods: ['GET'])]
+    public function reconciliationAgency(int $id): JsonResponse
+    {
+        $this->denyAccessUnlessGranted(AdminRoleVoter::FINANCE);
+        $wallet = $this->walletRepository->findOneBy(['agency' => $id, 'type' => Wallet::TYPE_AGENCY]);
+
+        if (!$wallet) {
+            return $this->json(['success' => false, 'error' => 'Wallet agence introuvable.'], 404);
+        }
+
+        return $this->json([
+            'success' => true,
+            'data' => $this->financialReconciliationService->reconcile($wallet),
+        ]);
+    }
+
+    #[Route('/treasury', name: 'api_admin_financial_treasury', methods: ['GET'])]
+    public function treasury(): JsonResponse
+    {
+        $platform = $this->walletRepository->getPlatformWalletSummary();
+        $agencyAvailable = $this->walletRepository->getTotalAvailableBalance();
+        $agencyBlocked = $this->walletRepository->getTotalBlockedBalance();
+        $agencyReserved = $this->walletRepository->getTotalReservedBalance();
+
+        return $this->json([
+            'success' => true,
+            'data' => [
+                'platformWallet' => $platform,
+                'agencyFunds' => [
+                    'available' => $agencyAvailable,
+                    'blocked' => $agencyBlocked,
+                    'reserved' => $agencyReserved,
+                    'total' => bcadd(bcadd($agencyAvailable, $agencyBlocked, 2), $agencyReserved, 2),
+                ],
+                'systemFunds' => [
+                    'platformAvailable' => $platform['available'],
+                    'agencyAvailable' => $agencyAvailable,
+                    'agencyBlocked' => $agencyBlocked,
+                    'agencyReserved' => $agencyReserved,
+                ],
+            ],
+            'timestamp' => (new \DateTimeImmutable())->format(\DateTimeInterface::ATOM),
+        ]);
+    }
+
+    #[Route('/treasury/export', name: 'api_admin_financial_treasury_export', methods: ['GET'])]
+    public function treasuryExport(): Response
+    {
+        $platform = $this->walletRepository->getPlatformWalletSummary();
+        $rows = [
+            ['type', 'available', 'blocked', 'reserved', 'total'],
+            ['platform', $platform['available'], $platform['blocked'], $platform['reserved'], bcadd(bcadd($platform['available'], $platform['blocked'], 2), $platform['reserved'], 2)],
+            ['agencies',
+                $this->walletRepository->getTotalAvailableBalance(),
+                $this->walletRepository->getTotalBlockedBalance(),
+                $this->walletRepository->getTotalReservedBalance(),
+                bcadd(
+                    bcadd($this->walletRepository->getTotalAvailableBalance(), $this->walletRepository->getTotalBlockedBalance(), 2),
+                    $this->walletRepository->getTotalReservedBalance(),
+                    2
+                )
+            ],
+        ];
+
+        $csv = '';
+        foreach ($rows as $row) {
+            $csv .= implode(',', array_map(static fn($v) => '"'.str_replace('"', '""', (string) $v).'"', $row))."\r\n";
+        }
+
+        return new Response($csv, 200, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="transito-treasury.csv"',
+        ]);
+    }
+
+    #[Route('/reconciliation/export', name: 'api_admin_financial_reconciliation_export', methods: ['GET'])]
+    public function reconciliationExport(): Response
+    {
+        $result = $this->financialReconciliationService->reconcile();
+
+        $rows = [[
+            'wallet_id', 'type', 'agency_id', 'agency_name', 'status',
+            'available', 'blocked', 'reserved', 'total',
+            'last_transaction_id', 'snapshot_complete', 'issues'
+        ]];
+
+        foreach ($result['wallets'] as $wallet) {
+            $rows[] = [
+                $wallet['walletId'],
+                $wallet['type'],
+                $wallet['agencyId'],
+                $wallet['agencyName'],
+                $wallet['status'],
+                $wallet['balances']['available'],
+                $wallet['balances']['blocked'],
+                $wallet['balances']['reserved'],
+                $wallet['balances']['total'],
+                $wallet['ledger']['lastTransactionId'],
+                $wallet['ledger']['snapshotComplete'] ? '1' : '0',
+                implode(' | ', $wallet['issues']),
+            ];
+        }
+
+        $csv = "\xEF\xBB\xBF";
+        foreach ($rows as $row) {
+            $csv .= implode(',', array_map(
+                static fn($v) => '"' . str_replace('"', '""', (string) ($v ?? '')) . '"',
+                $row
+            )) . "\r\n";
+        }
+
+        return new Response($csv, 200, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="transito-financial-reconciliation.csv"',
+        ]);
+    }
+
     #[Route('/revenue-analysis', name: 'api_admin_financial_revenue_analysis', methods: ['GET'])]
     public function getRevenueAnalysis(Request $request): JsonResponse
     {
@@ -61,7 +203,7 @@ class AdminFinancialController extends AbstractController
         $period = $request->query->get('period', 'monthly'); // daily, weekly, monthly
 
         // Get platform revenue metrics (fees, commissions, etc.)
-        $platformRevenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
+        $platformRevenue = $this->walletTransactionRepository->getPlatformEconomicRevenue($startDate, $endDate);
         $platformFees = $this->getPlatformFeesBreakdown($startDate, $endDate);
 
         // return $this->json([$platformRevenue]);
@@ -143,7 +285,7 @@ class AdminFinancialController extends AbstractController
             $endDate = $temp;
         }
 
-        $platformRevenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
+        $platformRevenue = $this->walletTransactionRepository->getPlatformEconomicRevenue($startDate, $endDate);
         $platformFees = $this->getPlatformFeesBreakdown($startDate, $endDate);
         $platformNetEarnings = $this->getPlatformNetEarnings($startDate, $endDate);
         $paymentDistribution = $this->getPlatformPaymentDistribution($startDate, $endDate);
@@ -974,14 +1116,13 @@ class AdminFinancialController extends AbstractController
      */
     private function getPlatformNetEarnings(\DateTimeInterface $startDate, \DateTimeInterface $endDate): string
     {
-        $revenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
-        // $refunds = $this->paymentLogRepository->getPendingRefundsAmount($startDate, $endDate);
-        $refunds = $this->paymentLogRepository->getPendingRefundsAmount();
+        // Les remboursements client ne déduisent pas les 500 FCFA de frais
+        // Transito selon le modèle économique. Ne jamais soustraire ici les
+        // remboursements bruts du billet, sinon le bénéfice plateforme devient
+        // artificiellement négatif.
+        $revenue = $this->walletTransactionRepository->getPlatformEconomicRevenue($startDate, $endDate);
 
-        // Calculate net earnings (revenue minus refunds and other costs)
-        $netEarnings = (float) $revenue - (float) $refunds;
-
-        return number_format($netEarnings, 2, '.', '');
+        return number_format((float) $revenue, 2, '.', '');
     }
 
     /**
@@ -1261,12 +1402,8 @@ class AdminFinancialController extends AbstractController
      */
     private function getPlatformBalance(): string
     {
-        // This would be the platform's own wallet balance
-        // For now, return platform revenue as a proxy
-        $startDate = new \DateTime('-30 days');
-        $endDate = new \DateTime('now');
-
-        return $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
+        $summary = $this->walletRepository->getPlatformWalletSummary();
+        return $summary['available'];
     }
 
     /**

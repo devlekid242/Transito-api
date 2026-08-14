@@ -2,11 +2,15 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+
 use App\Entity\Agency;
 use App\Entity\RefundRequest;
 use App\Entity\User;
 use App\Entity\WithdrawalRequest;
 use App\Repository\RefundRequestRepository;
+use App\Service\DomainStateTransitionService;
+use App\Service\AuditLogger;
 use App\Service\WalletService;
 use App\Repository\WithdrawalRequestRepository;
 use Doctrine\DBAL\LockMode;
@@ -30,6 +34,7 @@ use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
  * (ex : 'ROLE_SUPER_ADMIN').
  */
 #[Route('/api/admin/withdrawals')]
+#[IsGranted(AdminRoleVoter::FINANCE)]
 #[IsGranted('ROLE_ADMIN')]
 class AdminWithdrawalController extends AbstractController
 {
@@ -38,6 +43,9 @@ class AdminWithdrawalController extends AbstractController
         private WalletService $walletService,
         private WithdrawalRequestRepository $withdrawalRepository,
         private RefundRequestRepository $refundRequestRepository,
+        private \App\Service\AdminNotificationService $adminNotificationService,
+        private DomainStateTransitionService $stateTransitions,
+        private AuditLogger $auditLogger,
     ) {}
 
     /**
@@ -218,6 +226,13 @@ class AdminWithdrawalController extends AbstractController
             $this->em->flush();
             $connection->commit();
 
+            $this->adminNotificationService->notifyEvent(
+                'Retrait traité',
+                sprintf('Le retrait #%d de %s FCFA a été approuvé pour l’agence %s.', $withdrawal->getId(), $withdrawal->getAmount(), $withdrawal->getAgency()?->getName() ?? 'Inconnue'),
+                'FINANCE',
+                ['type' => 'withdrawal', 'withdrawalId' => $withdrawal->getId(), 'status' => 'approved', 'agencyId' => $withdrawal->getAgency()?->getId()]
+            );
+
             return $response;
         } catch (\Throwable $e) {
             $connection->rollBack();
@@ -292,7 +307,7 @@ class AdminWithdrawalController extends AbstractController
         $this->walletService->completeWithdrawal($withdrawal);
 
         // Update withdrawal status and traceability
-        $withdrawal->setStatus('approved');
+        $this->stateTransitions->transitionWithdrawal($withdrawal, 'approved');
         $withdrawal->setProcessedAt(new \DateTime());
         $withdrawal->setProcessedByAdmin($currentAdmin);
         
@@ -301,7 +316,11 @@ class AdminWithdrawalController extends AbstractController
         }
 
         $this->em->persist($withdrawal);
-
+        $this->auditLogger->record('WITHDRAWAL_APPROVED', 'WithdrawalRequest', (string) $withdrawal->getId(),
+            ['status' => 'pending'],
+            ['status' => $withdrawal->getStatus()],
+            ['source' => 'admin.withdrawal.approve', 'amount' => $withdrawal->getAmount(), 'agencyId' => $agency->getId(), 'forcePay' => $forcePay]
+        );
         return new JsonResponse([
             'success' => true,
             'id' => $withdrawal->getId(),
@@ -359,14 +378,26 @@ class AdminWithdrawalController extends AbstractController
 
             $this->walletService->releaseWithdrawal($withdrawal);
 
-            $withdrawal->setStatus('rejected');
+            $this->stateTransitions->transitionWithdrawal($withdrawal, 'rejected');
             $withdrawal->setProcessedAt(new \DateTime());
             $withdrawal->setProcessedByAdmin($currentAdmin);
             $withdrawal->setAdminNote($data['note'] ?? 'Rejeté par l\'administrateur.');
 
             $this->em->persist($withdrawal);
+            $this->auditLogger->record('WITHDRAWAL_REJECTED', 'WithdrawalRequest', (string) $withdrawal->getId(),
+                ['status' => 'pending'],
+                ['status' => $withdrawal->getStatus()],
+                ['source' => 'admin.withdrawal.reject', 'amount' => $withdrawal->getAmount(), 'agencyId' => $withdrawal->getAgency()?->getId(), 'note' => $withdrawal->getAdminNote()]
+            );
             $this->em->flush();
             $connection->commit();
+
+            $this->adminNotificationService->notifyEvent(
+                'Retrait rejeté',
+                sprintf('Le retrait #%d de %s FCFA a été rejeté pour l’agence %s.', $withdrawal->getId(), $withdrawal->getAmount(), $withdrawal->getAgency()?->getName() ?? 'Inconnue'),
+                'FINANCE',
+                ['type' => 'withdrawal', 'withdrawalId' => $withdrawal->getId(), 'status' => 'rejected', 'agencyId' => $withdrawal->getAgency()?->getId()]
+            );
         } catch (\Throwable $e) {
             $connection->rollBack();
             throw $e;

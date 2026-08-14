@@ -2,6 +2,8 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+
 use App\Entity\Agency;
 use App\Entity\Reservation;
 use App\Entity\WithdrawalRequest;
@@ -27,6 +29,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\Serializer\SerializerInterface;
 
 /**
@@ -34,6 +37,7 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Provides aggregated metrics and analytics for the overview dashboard.
  */
 #[Route('/api/admin/dashboard')]
+#[IsGranted('ROLE_ADMIN')]
 class AdminDashboardController extends AbstractController
 {
     public function __construct(
@@ -74,10 +78,7 @@ class AdminDashboardController extends AbstractController
         // Financial metrics
         $totalBalanceLocked = $this->walletRepository->getTotalReservedBalance();
         $totalBalanceAvailable = $this->walletRepository->getTotalAvailableBalance();
-        $totalBlockedBalance = $this->walletRepository->getTotalBlockedBalance(
-            $this->refundRequestRepository,
-            $this->ticketRepository
-        );
+        $totalBlockedBalance = $this->walletRepository->getTotalBlockedBalance();
         $platformRevenue = $this->walletTransactionRepository->getPlatformRevenue($startDate, $endDate);
         $pendingRefundsAmount = $this->paymentLogRepository->getPendingRefundsAmount();
         
@@ -111,11 +112,11 @@ class AdminDashboardController extends AbstractController
                     'newThisWeek' => $newUsersThisWeek,
                 ],
                 'finance' => [
-                    'totalBalanceLocked' => (float) $totalBalanceLocked,
-                    'totalBalanceAvailable' => (float) $totalBalanceAvailable,
-                    'totalBlockedBalance' => (float) $totalBlockedBalance,
-                    'platformRevenue' => (float) $platformRevenue,
-                    'pendingRefunds' => (float) $pendingRefundsAmount,
+                    'totalBalanceLocked' => (string) $totalBalanceLocked,
+                    'totalBalanceAvailable' => (string) $totalBalanceAvailable,
+                    'totalBlockedBalance' => (string) $totalBlockedBalance,
+                    'platformRevenue' => (string) $platformRevenue,
+                    'pendingRefunds' => (string) $pendingRefundsAmount,
                 ],
                 'reservations' => [
                     'today' => $reservationsToday,
@@ -125,7 +126,7 @@ class AdminDashboardController extends AbstractController
                 ],
                 'withdrawals' => [
                     'pendingCount' => $pendingWithdrawalsCount,
-                    'pendingAmount' => (float) $pendingWithdrawalsAmount,
+                    'pendingAmount' => (string) $pendingWithdrawalsAmount,
                 ],
                 'agents' => [
                     'total' => $totalAgents,
@@ -294,6 +295,7 @@ class AdminDashboardController extends AbstractController
      * Returns both revenue and new users series for the combined chart.
      */
     #[Route('/charts/revenue', name: 'api_admin_dashboard_charts_revenue', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::FINANCE)]
     public function getRevenueChartData(Request $request): JsonResponse
     {
         $period = $request->query->get('period', 'monthly'); // daily, weekly, monthly
@@ -364,6 +366,7 @@ class AdminDashboardController extends AbstractController
      * Get chart data for user distribution.
      */
     #[Route('/charts/users', name: 'api_admin_dashboard_charts_users', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::MODERATION)]
     public function getUserDistribution(): JsonResponse
     {
         $totalUsers = $this->userRepository->count([]);
@@ -385,6 +388,7 @@ class AdminDashboardController extends AbstractController
      * Get chart data for payment methods.
      */
     #[Route('/charts/payments', name: 'api_admin_dashboard_charts_payments', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::FINANCE)]
     public function getPaymentDistribution(): JsonResponse
     {
         $paymentMethods = $this->reservationRepository->getPaymentMethodDistribution();
@@ -409,6 +413,7 @@ class AdminDashboardController extends AbstractController
      * Get KYC compliance distribution.
      */
     #[Route('/charts/kyc', name: 'api_admin_dashboard_charts_kyc', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::MODERATION)]
     public function getKycDistribution(): JsonResponse
     {
         $kycStats = $this->agencyRepository->getKycStatusDistribution();
@@ -433,6 +438,7 @@ class AdminDashboardController extends AbstractController
      * Get top routes by reservations and revenue.
      */
     #[Route('/top-routes', name: 'api_admin_dashboard_top_routes', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::MODERATION)]
     public function getTopRoutes(Request $request): JsonResponse
     {
         $limit = (int) $request->query->get('limit', 5);
@@ -459,6 +465,7 @@ class AdminDashboardController extends AbstractController
      * Returns daily reservations count for the last 7 days.
      */
     #[Route('/charts/reservations', name: 'api_admin_dashboard_charts_reservations', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::MODERATION)]
     public function getReservationsTrend(): JsonResponse
     {
         $reservationsByDay = $this->reservationRepository->getReservationsByDay();
@@ -498,6 +505,7 @@ class AdminDashboardController extends AbstractController
      * Returns weekly new users count for the last 8 months.
      */
     #[Route('/charts/new-users', name: 'api_admin_dashboard_charts_new_users', methods: ['GET'])]
+    #[IsGranted(AdminRoleVoter::MODERATION)]
     public function getNewUsersTrend(): JsonResponse
     {
         $newUsersByMonth = $this->userRepository->getNewUsersByMonth();

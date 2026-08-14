@@ -19,6 +19,32 @@ class WalletTransactionRepository extends ServiceEntityRepository
     }
 
     /**
+     * Revenu économique de la plateforme : frais Transito + revenus de
+     * no-show. Les crédits/débits administratifs et les transferts de wallet
+     * ne sont pas des revenus commerciaux.
+     */
+    public function getPlatformEconomicRevenue(DateTimeInterface $startDate, DateTimeInterface $endDate): string
+    {
+        $result = $this->createQueryBuilder('wt')
+            ->select('SUM(wt.amount) as total')
+            ->join('wt.wallet', 'w')
+            ->where('wt.source IN (:sources)')
+            ->andWhere('w.type = :walletType')
+            ->andWhere('wt.createdAt BETWEEN :start AND :end')
+            ->setParameter('sources', [
+                WalletTransaction::SOURCE_PLATFORM_FEE,
+                WalletTransaction::SOURCE_NO_SHOW_REVENUE,
+            ])
+            ->setParameter('walletType', Wallet::TYPE_PLATFORM)
+            ->setParameter('start', $startDate)
+            ->setParameter('end', $endDate)
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return $result ?? '0.00';
+    }
+
+    /**
      * Total des commissions récoltées par la plateforme
      */
     public function getPlatformRevenue(DateTimeInterface $startDate, DateTimeInterface $endDate): string

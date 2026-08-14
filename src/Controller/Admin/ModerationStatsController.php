@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Service\ModerationStatsService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -15,6 +18,7 @@ use DateTimeInterface;
  * Provides comprehensive statistical endpoints for platform analytics and agency comparison.
  */
 #[Route('/api/admin/moderation')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class ModerationStatsController extends AbstractController
 {
     public function __construct(

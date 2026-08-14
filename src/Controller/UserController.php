@@ -61,7 +61,7 @@ class UserController extends AbstractController
             return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
         }
 
-        $requiredFields = ['fullName', 'phoneNumber', 'villeResidence', 'quartier'];
+        $requiredFields = ['fullName', 'villeResidence', 'quartier'];
         foreach ($requiredFields as $field) {
             if (array_key_exists($field, $data) && trim((string) $data[$field]) === '') {
                 return $this->json(
@@ -78,7 +78,9 @@ class UserController extends AbstractController
             $user->setEmail($data['email'] !== null ? (string) $data['email'] : null);
         }
         if (array_key_exists('phoneNumber', $data)) {
-            $user->setPhoneNumber((string) $data['phoneNumber']);
+            return $this->json([
+                'message' => 'Le numéro de téléphone ne peut pas être modifié directement. Utilisez le parcours OTP de vérification du nouveau numéro.'
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
         if (array_key_exists('villeResidence', $data)) {
@@ -204,6 +206,7 @@ class UserController extends AbstractController
                 'roles' => $user->getRoles(),
                 'agentRole' => $agent->getAgentRole(),
                 'status' => $agent->getStatus(),
+                'created_at' => $user->getCreatedAt()?->format(\DateTimeInterface::ATOM),
             ];
         }, $agents);
         return $this->json($staffUsers);

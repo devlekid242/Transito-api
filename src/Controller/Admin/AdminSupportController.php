@@ -2,6 +2,8 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+
 use App\Entity\FAQ;
 use App\Entity\SupportResponse;
 use App\Entity\SupportTicket;
@@ -20,14 +22,22 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\Serializer\SerializerInterface;
 
 /**
- * Correction de sécurité majeure : ce contrôleur ne comportait AUCUN contrôle
- * d'accès. Selon la configuration du firewall (security.yaml), n'importe quel
- * appelant pouvait potentiellement lister/modifier/supprimer tous les tickets
- * de support et toutes les FAQ via /api/admin/support/*.
- * L'attribut #[IsGranted('ROLE_ADMIN')] ci-dessous force désormais un accès
- * réservé aux administrateurs sur l'ensemble des routes de ce contrôleur.
+ * Correction de sécurité majeure (déjà appliquée) : #[IsGranted('ROLE_ADMIN')]
+ * réserve désormais l'ensemble des routes de ce contrôleur aux administrateurs.
+ *
+ * 👈 NOUVELLE CORRECTION (cette passe) : la quasi-totalité des routes
+ * renvoyaient des entités Doctrine BRUTES dans le JsonResponse
+ * (`'data' => $tickets`, `'ticket' => $ticket`, `'response' => $response`...).
+ * Comme ces entités n'ont que des propriétés PRIVÉES et n'implémentent pas
+ * JsonSerializable, `json_encode()` les sérialisait en objets vides `{}`.
+ * Concrètement : la boîte de réception admin recevait des tickets sans
+ * sujet, sans utilisateur, sans message — le front n'avait rien à afficher.
+ * Toutes les routes utilisent maintenant `ticketToArray()` / `responseToArray()`
+ * / `faqToArray()` pour renvoyer des tableaux explicites, comme le fait déjà
+ * SupportController côté client.
  */
 #[Route('/api/admin/support')]
+#[IsGranted(AdminRoleVoter::SUPPORT)]
 #[IsGranted('ROLE_ADMIN')]
 class AdminSupportController extends AbstractController
 {
@@ -37,16 +47,124 @@ class AdminSupportController extends AbstractController
         private SupportTicketRepository $ticketRepository,
         private SupportResponseRepository $responseRepository,
         private FAQRepository $faqRepository,
-        private UserRepository $userRepository,
         private NotificationBroadcastService $notificationBroadcaster,
-        private AdminNotificationHelper $adminNotifier
+        private AdminNotificationHelper $adminNotifier,
+        private UserRepository $userRepository
     ) {}
+
+    // ==================== SÉRIALISATION ====================
+
+    /**
+     * Sérialise un ticket en tableau. `$withResponses` embarque aussi les
+     * réponses (utile pour la vue détail, évite un second appel front).
+     * `lastResponse` est ajouté pour permettre à la liste admin d'afficher
+     * un aperçu du dernier message sans requête supplémentaire.
+     *
+     * ⚠️ Note perf : sur une liste de tickets, ->getResponses()->last()
+     * déclenche le chargement de la collection pour chaque ticket (N+1).
+     * Acceptable pour un volume modéré ; si la liste grossit, remplacer par
+     * une sous-requête dédiée (DQL) qui ne remonte que le dernier message.
+     */
+    private function ticketToArray(SupportTicket $t, bool $withResponses = false): array
+    {
+        $user = $t->getUser();
+        $assignedTo = $t->getAssignedTo();
+        /** @var SupportResponse|false $last */
+        $last = $t->getResponses()->isEmpty() ? null : $t->getResponses()->last();
+
+        $data = [
+            'id' => $t->getId(),
+            'subject' => $t->getSubject(),
+            'message' => $t->getMessage(),
+            'category' => $t->getCategory(),
+            'status' => $t->getStatus(),
+            'priority' => $t->getPriority(),
+            'createdAt' => $t->getCreatedAt()?->format(DATE_ATOM),
+            'updatedAt' => $t->getUpdatedAt()?->format(DATE_ATOM),
+            'closedAt' => $t->getClosedAt()?->format(DATE_ATOM),
+            'closedReason' => $t->getClosedReason(),
+            'firstResponseAt' => $t->getFirstResponseAt()?->format(DATE_ATOM),
+            'slaDueAt' => $t->getSlaDueAt()?->format(DATE_ATOM),
+            'slaBreached' => $t->isSlaBreached(),
+            'responseCount' => $t->getResponses()->count(),
+            'reservationId' => $t->getReservation()?->getId(),
+            'tripId' => $t->getTrip()?->getId(),
+            'agencyId' => $t->getAgency()?->getId(),
+            'user' => $user ? [
+                'id' => $user->getId(),
+                'fullName' => method_exists($user, 'getFullName') ? $user->getFullName() : null,
+                'email' => method_exists($user, 'getEmail') ? $user->getEmail() : null,
+                'phoneNumber' => method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : null,
+            ] : null,
+            'assignedTo' => $assignedTo ? [
+                'id' => $assignedTo->getId(),
+                'fullName' => method_exists($assignedTo, 'getFullName') ? $assignedTo->getFullName() : null,
+            ] : null,
+            'lastResponse' => $last ? [
+                'id' => $last->getId(),
+                'message' => $last->getMessage(),
+                'createdAt' => $last->getCreatedAt()?->format(DATE_ATOM),
+            ] : null,
+        ];
+
+        if ($withResponses) {
+            $data['responses'] = array_map(
+                fn (SupportResponse $r) => $this->responseToArray($r),
+                $t->getResponses()->toArray()
+            );
+        }
+
+        return $data;
+    }
+
+    /**
+     * `isFromSupport` remplace la relation `agent` (jamais renseignée en
+     * pratique — voir addAdminResponse). On la déduit en comparant l'auteur
+     * du message au propriétaire du ticket : si ce n'est pas le client,
+     * c'est forcément un membre du support (seuls admin/support et le
+     * propriétaire peuvent répondre, cf. SupportController::addResponse).
+     */
+    private function responseToArray(SupportResponse $r): array
+    {
+        $ticket = $r->getTicket();
+        $author = $r->getAuthor();
+        $isFromSupport = $author !== null
+            && (!$ticket?->getUser() || $ticket->getUser()->getId() !== $author->getId());
+
+        return [
+            'id' => $r->getId(),
+            'ticketId' => $ticket?->getId(),
+            'message' => $r->getMessage(),
+            'createdAt' => $r->getCreatedAt()?->format(DATE_ATOM),
+            'isFromSupport' => $isFromSupport,
+            'author' => $author ? [
+                'id' => $author->getId(),
+                'fullName' => method_exists($author, 'getFullName') ? $author->getFullName() : null,
+            ] : null,
+        ];
+    }
+
+    private function faqToArray(FAQ $f): array
+    {
+        // NOTE : FAQ.php ne m'a pas été fourni. Le nom exact du getter pour
+        // le booléen actif/inactif peut être isActive() ou getIsActive() —
+        // les deux sont testés pour éviter une erreur fatale à l'exécution.
+        $isActive = method_exists($f, 'isActive')
+            ? $f->isActive()
+            : (method_exists($f, 'getIsActive') ? $f->getIsActive() : null);
+
+        return [
+            'id' => $f->getId(),
+            'question' => $f->getQuestion(),
+            'answer' => $f->getAnswer(),
+            'category' => $f->getCategory(),
+            'orderPriority' => $f->getOrderPriority(),
+            'isActive' => $isActive,
+        ];
+    }
 
     // ==================== SUPPORT TICKETS ====================
 
-    /**
-     * Get all support tickets with optional filtering
-     */
     #[Route('/tickets', name: 'admin_support_tickets', methods: ['GET'])]
     public function getAllTickets(Request $request): JsonResponse
     {
@@ -73,33 +191,21 @@ class AdminSupportController extends AbstractController
         }
 
         if ($search) {
-            // Correction : la clause OR était parenthésée nulle part, donc
-            // combinée avec AND status/priority/category elle cassait le
-            // filtrage (un ticket pouvait remonter en ignorant les autres
-            // filtres dès que "message" matchait la recherche).
             $queryBuilder->andWhere('(t.subject LIKE :search OR t.message LIKE :search)')
                 ->setParameter('search', '%' . $search . '%');
         }
 
-        $tickets = $queryBuilder
-            ->setMaxResults($limit)
-            ->setFirstResult($offset)
-            ->getQuery()
-            ->getResult();
-
-        $total = $this->ticketRepository->count([]);
+        $total = (int) $queryBuilder->select('COUNT(t.id)')->resetDQLPart('orderBy')->setFirstResult(null)->setMaxResults(null)->getQuery()->getSingleScalarResult();
+        $tickets = $queryBuilder->select('t')->orderBy('t.createdAt', 'DESC')->setMaxResults($limit)->setFirstResult($offset)->getQuery()->getResult();
 
         return new JsonResponse([
-            'data' => $tickets,
+            'data' => array_map(fn (SupportTicket $t) => $this->ticketToArray($t), $tickets),
             'total' => $total,
             'limit' => $limit,
-            'offset' => $offset
+            'offset' => $offset,
         ], 200);
     }
 
-    /**
-     * Get a single support ticket with its responses
-     */
     #[Route('/tickets/{id}', name: 'admin_support_ticket_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function getTicketDetail(int $id): JsonResponse
     {
@@ -109,17 +215,47 @@ class AdminSupportController extends AbstractController
             return new JsonResponse(['error' => 'Ticket not found'], 404);
         }
 
-        $responses = $this->responseRepository->findBy(['ticket' => $ticket], ['createdAt' => 'ASC']);
-
         return new JsonResponse([
-            'ticket' => $ticket,
-            'responses' => $responses
+            'data' => $this->ticketToArray($ticket, true),
         ], 200);
     }
 
-    /**
-     * Update a support ticket status
-     */
+    #[Route('/tickets/{id}/assign', name: 'admin_support_ticket_assign', requirements: ['id' => '\d+'], methods: ['PUT'])]
+    public function assignTicket(int $id, Request $request): JsonResponse
+    {
+        $ticket = $this->ticketRepository->find($id);
+        if (!$ticket) return new JsonResponse(['error' => 'Ticket not found'], 404);
+
+        $data = json_decode($request->getContent(), true) ?: [];
+        $assigneeId = $data['userId'] ?? null;
+        if ($assigneeId === null) {
+            $ticket->setAssignedTo(null)->touch();
+            $this->em->flush();
+            return new JsonResponse(['message' => 'Ticket unassigned', 'ticket' => $this->ticketToArray($ticket)], 200);
+        }
+
+        $assignee = $this->userRepository->find((int) $assigneeId);
+        if (!$assignee) return new JsonResponse(['error' => 'Assignee not found'], 404);
+        if (!$this->isGranted('ROLE_ADMIN') && !$this->isGranted('ROLE_SUPPORT')) {
+            return new JsonResponse(['error' => 'Invalid support assignee'], 403);
+        }
+
+        $ticket->setAssignedTo($assignee)->touch();
+        $this->em->flush();
+
+        $notification = new \App\Entity\Notification();
+        $notification->setRecipientType('user')
+            ->setRecipientId($assignee->getId())
+            ->setTitle('Ticket de support assigné')
+            ->setContent('Un ticket de support vous a été assigné : « ' . $ticket->getSubject() . ' ».')
+            ->setCategory('SUPPORT');
+        $this->em->persist($notification);
+        $this->em->flush();
+        $this->notificationBroadcaster->broadcast($notification);
+
+        return new JsonResponse(['message' => 'Ticket assigned', 'ticket' => $this->ticketToArray($ticket)], 200);
+    }
+
     #[Route('/tickets/{id}/status', name: 'admin_support_ticket_status', methods: ['PUT'])]
     public function updateTicketStatus(int $id, Request $request): JsonResponse
     {
@@ -131,6 +267,7 @@ class AdminSupportController extends AbstractController
 
         $data = json_decode($request->getContent(), true);
         $status = $data['status'] ?? null;
+        $closeReason = trim((string) ($data['reason'] ?? ''));
 
         if (!in_array($status, ['open', 'answered', 'closed', 'pending'], true)) {
             return new JsonResponse(['error' => 'Invalid status'], 400);
@@ -138,9 +275,18 @@ class AdminSupportController extends AbstractController
 
         $oldStatus = $ticket->getStatus();
         $ticket->setStatus($status);
+        if ($status === 'closed') {
+            $ticket->setClosedReason($closeReason !== '' ? $closeReason : $ticket->getClosedReason());
+            if ($ticket->getClosedAt() === null) {
+                $ticket->close();
+                $ticket->setClosedReason($closeReason !== '' ? $closeReason : null);
+            }
+        } elseif ($oldStatus === 'closed') {
+            $ticket->setClosedReason(null);
+            $ticket->touch();
+        }
         $this->em->flush();
 
-        // Notify user when ticket is closed or answered
         if ($ticket->getUser() && $oldStatus !== $status) {
             $notificationTitle = '';
             $notificationContent = '';
@@ -173,12 +319,9 @@ class AdminSupportController extends AbstractController
             }
         }
 
-        return new JsonResponse(['message' => 'Ticket status updated', 'ticket' => $ticket], 200);
+        return new JsonResponse(['message' => 'Ticket status updated', 'ticket' => $this->ticketToArray($ticket)], 200);
     }
 
-    /**
-     * Update a support ticket priority
-     */
     #[Route('/tickets/{id}/priority', name: 'admin_support_ticket_priority', methods: ['PUT'])]
     public function updateTicketPriority(int $id, Request $request): JsonResponse
     {
@@ -198,11 +341,17 @@ class AdminSupportController extends AbstractController
         $ticket->setPriority($priority);
         $this->em->flush();
 
-        return new JsonResponse(['message' => 'Ticket priority updated', 'ticket' => $ticket], 200);
+        return new JsonResponse(['message' => 'Ticket priority updated', 'ticket' => $this->ticketToArray($ticket)], 200);
     }
 
     /**
-     * Admin adds a response to a support ticket
+     * Réponse admin à un ticket.
+     * 👈 CORRIGÉ : setAgent() n'est plus appelé (Agent ≠ User, voir note
+     * précédente) — seul setAuthor() est utilisé, et la distinction
+     * agent/client se fait désormais via `isFromSupport` côté sérialisation.
+     * 👈 CORRIGÉ (cette passe) : `markFirstResponse()` manquait ici, ce qui
+     * faussait le calcul du SLA (`slaBreached` restait vrai même après une
+     * réponse envoyée depuis le back-office admin).
      */
     #[Route('/tickets/{id}/responses', name: 'admin_support_add_response', methods: ['POST'])]
     public function addAdminResponse(int $id, Request $request): JsonResponse
@@ -214,9 +363,9 @@ class AdminSupportController extends AbstractController
         }
 
         $data = json_decode($request->getContent(), true);
-        $message = $data['message'] ?? '';
+        $message = trim((string) ($data['message'] ?? ''));
 
-        if (empty($message)) {
+        if ($message === '') {
             return new JsonResponse(['error' => 'Message cannot be empty'], 400);
         }
 
@@ -224,48 +373,37 @@ class AdminSupportController extends AbstractController
         $response->setTicket($ticket);
         $response->setMessage($message);
 
-        // ATTENTION — bug non corrigé, à valider avec le fichier Agent.php :
-        // setAgent() attend une instance de App\Entity\Agent, mais le code
-        // original faisait $this->userRepository->find($admin->getId()),
-        // ce qui renvoie une instance de App\Entity\User et non de Agent.
-        // Si Agent et User sont deux entités distinctes (ce que suggère la
-        // relation ManyToOne(targetEntity: Agent::class) dans SupportResponse),
-        // cette ligne provoquera un TypeError à l'exécution.
-        // Merci de fournir Agent.php et AgentRepository.php pour que je
-        // puisse corriger correctement, par exemple via :
-        //   $agent = $this->agentRepository->findOneBy(['user' => $admin]);
-        /** @var \App\Entity\User $admin */
+        /** @var \App\Entity\User|null $admin */
         $admin = $this->getUser();
         if ($admin) {
-            $response->setAgent($this->userRepository->find($admin->getId())); // TODO: bug type Agent/User, voir commentaire ci-dessus
+            $response->setAuthor($admin);
         }
 
         $this->em->persist($response);
-        $this->em->flush();
 
-        // Update ticket status to answered
         $ticket->setStatus('answered');
+        $ticket->markFirstResponse();
+        $ticket->touch();
         $this->em->flush();
 
-        // Notify the user
         if ($ticket->getUser()) {
             $notification = new \App\Entity\Notification();
             $notification->setRecipientType('user')
                 ->setRecipientId($ticket->getUser()->getId())
                 ->setTitle('Réponse au ticket de support')
-                ->setContent('Une nouvelle réponse a été ajoutée à votre ticket: ' . $ticket->getSubject())
+                ->setContent('Une nouvelle réponse a été ajoutée à votre ticket : ' . $ticket->getSubject())
                 ->setCategory('SUPPORT');
             $this->em->persist($notification);
             $this->em->flush();
             $this->notificationBroadcaster->broadcast($notification);
         }
 
-        return new JsonResponse(['message' => 'Response added', 'response' => $response], 201);
+        return new JsonResponse([
+            'message' => 'Response added',
+            'response' => $this->responseToArray($response),
+        ], 201);
     }
 
-    /**
-     * Get support ticket statistics for dashboard
-     */
     #[Route('/tickets/stats', name: 'admin_support_tickets_stats', methods: ['GET'])]
     public function getTicketStats(): JsonResponse
     {
@@ -276,6 +414,7 @@ class AdminSupportController extends AbstractController
 
         $highPriorityCount = $this->ticketRepository->count(['priority' => 'high']);
         $criticalPriorityCount = $this->ticketRepository->count(['priority' => 'critical']);
+        $slaBreachedCount = (int) $this->ticketRepository->createQueryBuilder('t')->select('COUNT(t.id)')->where('t.status != :closed')->andWhere('t.firstResponseAt IS NULL')->andWhere('t.slaDueAt IS NOT NULL')->andWhere('t.slaDueAt < :now')->setParameter('closed', 'closed')->setParameter('now', new \DateTime())->getQuery()->getSingleScalarResult();
 
         $recentTickets = $this->ticketRepository->findBy([], ['createdAt' => 'DESC'], 5);
 
@@ -287,16 +426,14 @@ class AdminSupportController extends AbstractController
                 'pending' => $pendingCount,
                 'high_priority' => $highPriorityCount,
                 'critical_priority' => $criticalPriorityCount,
+                'sla_breached' => $slaBreachedCount,
             ],
-            'recent_tickets' => $recentTickets
+            'recent_tickets' => array_map(fn (SupportTicket $t) => $this->ticketToArray($t), $recentTickets),
         ], 200);
     }
 
     // ==================== FAQ MANAGEMENT ====================
 
-    /**
-     * Get all FAQs with optional filtering
-     */
     #[Route('/faqs', name: 'admin_support_faqs', methods: ['GET'])]
     public function getAllFAQs(Request $request): JsonResponse
     {
@@ -319,9 +456,6 @@ class AdminSupportController extends AbstractController
         }
 
         if ($search) {
-            // Correction : même bug de précédence AND/OR que dans getAllTickets
-            // ci-dessus — parenthèse ajoutée pour éviter qu'une FAQ inactive
-            // ou d'une autre catégorie ne remonte via la recherche.
             $queryBuilder->andWhere('(f.question LIKE :search OR f.answer LIKE :search)')
                 ->setParameter('search', '%' . $search . '%');
         }
@@ -337,17 +471,13 @@ class AdminSupportController extends AbstractController
             $this->faqRepository->count([]);
 
         return new JsonResponse([
-            'data' => $faqs,
+            'data' => array_map(fn (FAQ $f) => $this->faqToArray($f), $faqs),
             'total' => $total,
             'limit' => $limit,
-            'offset' => $offset
+            'offset' => $offset,
         ], 200);
     }
 
-
-    /**
-     * Create a new FAQ
-     */
     #[Route('/faqs', name: 'admin_support_create_faq', methods: ['POST'])]
     public function createFAQ(Request $request): JsonResponse
     {
@@ -367,12 +497,9 @@ class AdminSupportController extends AbstractController
         $this->em->persist($faq);
         $this->em->flush();
 
-        return new JsonResponse(['message' => 'FAQ created', 'faq' => $faq], 201);
+        return new JsonResponse(['message' => 'FAQ created', 'faq' => $this->faqToArray($faq)], 201);
     }
 
-    /**
-     * Update an existing FAQ
-     */
     #[Route('/faqs/{id}', name: 'admin_support_update_faq', methods: ['PUT'])]
     public function updateFAQ(int $id, Request $request): JsonResponse
     {
@@ -402,12 +529,9 @@ class AdminSupportController extends AbstractController
 
         $this->em->flush();
 
-        return new JsonResponse(['message' => 'FAQ updated', 'faq' => $faq], 200);
+        return new JsonResponse(['message' => 'FAQ updated', 'faq' => $this->faqToArray($faq)], 200);
     }
 
-    /**
-     * Delete an FAQ
-     */
     #[Route('/faqs/{id}', name: 'admin_support_delete_faq', methods: ['DELETE'])]
     public function deleteFAQ(int $id): JsonResponse
     {
@@ -423,9 +547,6 @@ class AdminSupportController extends AbstractController
         return new JsonResponse(['message' => 'FAQ deleted'], 200);
     }
 
-    /**
-     * Get FAQ categories
-     */
     #[Route('/faqs/categories', name: 'admin_support_faq_categories', methods: ['GET'])]
     public function getFAQCategories(): JsonResponse
     {
@@ -443,9 +564,6 @@ class AdminSupportController extends AbstractController
         return new JsonResponse(['categories' => $categories], 200);
     }
 
-    /**
-     * Reorder FAQs
-     */
     #[Route('/faqs/reorder', name: 'admin_support_faq_reorder', methods: ['PUT'])]
     public function reorderFAQs(Request $request): JsonResponse
     {
@@ -468,9 +586,6 @@ class AdminSupportController extends AbstractController
         return new JsonResponse(['message' => 'FAQs reordered'], 200);
     }
 
-    /**
-     * Get a single FAQ
-     */
     #[Route('/faqs/{id}', name: 'admin_support_faq_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function getFAQ(int $id): JsonResponse
     {
@@ -480,6 +595,6 @@ class AdminSupportController extends AbstractController
             return new JsonResponse(['error' => 'FAQ not found'], 404);
         }
 
-        return new JsonResponse(['faq' => $faq], 200);
+        return new JsonResponse(['faq' => $this->faqToArray($faq)], 200);
     }
 }

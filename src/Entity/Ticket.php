@@ -20,7 +20,7 @@ use App\Controller\TicketController;
     normalizationContext: ['groups' => ['ticket:read']],
     denormalizationContext: ['groups' => ['ticket:write']],
     operations: [
-        new GetCollection(),
+        new GetCollection(security: "is_granted('ROLE_ADMIN')"),
         new GetCollection(
             uriTemplate: '/tickets/list',
             controller: TicketController::class . '::list',
@@ -90,15 +90,26 @@ class Ticket
     #[Groups(['ticket:read', 'ticket:write'])]
     private ?int $seatNumber = null;
 
-    #[ORM\Column(name: 'qr_code_token', length: 255, unique: true)]
-    #[Assert\NotBlank(message: "Le jeton unique du QR Code est obligatoire.")]
-    #[Groups(['ticket:read', 'ticket:write'])]
+    #[ORM\Column(name: 'qr_code_token', length: 255, unique: true, nullable: true)]
+        #[Groups(['ticket:read', 'ticket:write'])]
     private ?string $qrCodeToken = null;
 
     #[ORM\Column(length: 30, options: ['default' => 'en_attente'])]
-    #[Assert\Choice(choices: ['en_attente', 'embarque', 'annule'], message: "Statut du ticket invalide.")]
+    #[Assert\Choice(choices: ['en_attente', 'embarque', 'annule', 'no_show'], message: "Statut du ticket invalide.")]
     #[Groups(['ticket:read', 'ticket:write'])]
     private string $status = 'en_attente';
+
+    /**
+     * Part nette du prix de la réservation affectée à CE billet.
+     *
+     * Cette valeur évite les erreurs de division lors du règlement de plusieurs
+     * billets d'une même réservation (ex: 14 999 / 3). Le dernier billet reçoit
+     * le reliquat afin que la somme des billets soit exactement égale au montant
+     * net de la réservation.
+     */
+    #[ORM\Column(name: 'settlement_amount', type: Types::DECIMAL, precision: 12, scale: 2, nullable: true)]
+    #[Groups(['ticket:read'])]
+    private ?string $settlementAmount = null;
 
     #[ORM\Column(name: 'validated_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     #[Groups(['ticket:read', 'ticket:write'])]
@@ -183,7 +194,7 @@ class Ticket
         return $this->qrCodeToken;
     }
 
-    public function setQrCodeToken(string $qrCodeToken): static
+    public function setQrCodeToken(?string $qrCodeToken): static
     {
         $this->qrCodeToken = $qrCodeToken;
         return $this;
@@ -197,6 +208,17 @@ class Ticket
     public function setStatus(string $status): static
     {
         $this->status = $status;
+        return $this;
+    }
+
+    public function getSettlementAmount(): ?string
+    {
+        return $this->settlementAmount;
+    }
+
+    public function setSettlementAmount(?string $settlementAmount): static
+    {
+        $this->settlementAmount = $settlementAmount;
         return $this;
     }
 

@@ -7,7 +7,7 @@ use ApiPlatform\Metadata\ApiResource;
 
 #[ORM\Entity]
 #[ORM\Table(name: '`baggages`')]
-#[ApiResource]
+#[ApiResource(operations: [])]
 class Baggage
 {
     #[ORM\Id]

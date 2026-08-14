@@ -13,7 +13,15 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[ORM\Table(name: '`cities`')]
 #[ApiResource(
     normalizationContext: ['groups' => ['city:read']],
-    denormalizationContext: ['groups' => ['city:write']]
+    denormalizationContext: ['groups' => ['city:write']],
+    operations: [
+        new \ApiPlatform\Metadata\GetCollection(),
+        new \ApiPlatform\Metadata\Get(),
+        new \ApiPlatform\Metadata\Post(security: "is_granted('ROLE_ADMIN')"),
+        new \ApiPlatform\Metadata\Put(security: "is_granted('ROLE_ADMIN')"),
+        new \ApiPlatform\Metadata\Patch(security: "is_granted('ROLE_ADMIN')"),
+        new \ApiPlatform\Metadata\Delete(security: "is_granted('ROLE_ADMIN')")
+    ]
 )]
 class City
 {

@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Agency;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
@@ -12,6 +15,8 @@ use App\Repository\TicketRepository;
 use App\Repository\TripRepository;
 use App\Repository\UserRepository;
 use App\Service\StatusMapperService;
+use App\Service\TripCancellationService;
+use App\Service\AuditLogger;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -25,6 +30,7 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Provides endpoints for listing, filtering trips, and retrieving trip details with manifest data.
  */
 #[Route('/api/admin/trips')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class AdminTripController extends AbstractController
 {
     public function __construct(
@@ -36,6 +42,8 @@ class AdminTripController extends AbstractController
         private AgencyRepository $agencyRepository,
         private UserRepository $userRepository,
         private StatusMapperService $statusMapperService,
+        private TripCancellationService $tripCancellationService,
+        private AuditLogger $auditLogger,
     ) {}
 
     private function resolveBackendStatusesForFilter(string $status): array
@@ -205,6 +213,75 @@ class AdminTripController extends AbstractController
             'success' => true,
             'data' => $data,
         ]);
+    }
+
+    /**
+     * Cancel a future trip administratively.
+     *
+     * This uses the same transactional cancellation engine as the agency
+     * workflow: paid reservations become refund requests, tickets are
+     * invalidated, seats are released, and the operation is audited.
+     */
+    #[Route('/{id}/cancel', name: 'api_admin_trips_cancel', requirements: ['id' => '\d+'], methods: ['POST'])]
+    public function cancel(int $id, Request $request): JsonResponse
+    {
+        $trip = $this->tripRepository->find($id);
+        if (!$trip) {
+            return $this->json(['success' => false, 'message' => 'Voyage introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $actor = $this->getUser();
+        if (!$actor instanceof \App\Entity\User) {
+            return $this->json(['success' => false, 'message' => 'Authentification requise.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $payload = json_decode($request->getContent(), true) ?? [];
+        $reason = trim((string) ($payload['reason'] ?? 'Voyage annulé par l’administration'));
+        if ($reason === '') {
+            $reason = 'Voyage annulé par l’administration';
+        }
+
+        try {
+            $before = [
+                'status' => $trip->getStatus(),
+                'seatsReserved' => $trip->getSeatsReserved(),
+            ];
+
+            $result = $this->tripCancellationService->cancel($trip, $actor, $reason);
+
+            $this->auditLogger->record(
+                'TRIP_ADMIN_CANCELLED',
+                'Trip',
+                (string) $id,
+                $before,
+                [
+                    'status' => $result['trip']->getStatus(),
+                    'seatsReserved' => $result['trip']->getSeatsReserved(),
+                ],
+                [
+                    'reason' => $reason,
+                    'cancelledReservations' => $result['cancelledReservations'],
+                    'refundRequests' => $result['refundRequests'],
+                    'refundAmountPending' => $result['refundedAmount'],
+                    'agencyId' => $trip->getAgency()?->getId(),
+                ]
+            );
+
+            return $this->json([
+                'success' => true,
+                'message' => 'Voyage annulé. Les demandes de remboursement ont été transmises au traitement financier.',
+                'data' => [
+                    'trip' => $this->normalizeTripDetail($result['trip']),
+                    'cancelledReservations' => $result['cancelledReservations'],
+                    'refundRequests' => $result['refundRequests'],
+                    'refundAmountPending' => $result['refundedAmount'],
+                ],
+            ]);
+        } catch (\RuntimeException $e) {
+            return $this->json(['success' => false, 'message' => $e->getMessage()], Response::HTTP_UNPROCESSABLE_ENTITY);
+        } catch (\Throwable $e) {
+            return $this->json(['success' => false, 'message' => 'Impossible d’annuler ce voyage pour le moment.'], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
     }
 
     /**

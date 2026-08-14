@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Dto\ApplicationApproveDto;
 use App\Dto\ApplicationRejectDto;
 use App\Entity\Agency;
@@ -28,6 +31,7 @@ use Symfony\Component\Validator\Validator\ValidatorInterface;
  * Provides endpoints for listing, filtering, viewing, approving, and rejecting applications.
  */
 #[Route('/api/admin/applications')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class AdminApplicationController extends AbstractController
 {
     public function __construct(

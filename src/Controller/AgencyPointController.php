@@ -94,7 +94,10 @@ class AgencyPointController extends AbstractController
             return $this->json(['message' => 'Agence introuvable pour l\'utilisateur connecté.'], Response::HTTP_FORBIDDEN);
         }
 
+        
         $data = json_decode($request->getContent(), true) ?? [];
+        // return $this->Json($data, Response::HTTP_BAD_REQUEST);
+
         $point = new AgencyPoint();
         $point->setAgency($agency);
         $point->setCity($data['city'] ?? '');
@@ -191,6 +194,24 @@ class AgencyPointController extends AbstractController
 
         if (!$this->isAllowedAgency($point->getAgency())) {
             return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $futureTrips = $this->em->getRepository(\App\Entity\Trip::class)->createQueryBuilder('t')
+            ->select('COUNT(t.id)')
+            ->where('(t.departurePoint = :point OR t.arrivalPoint = :point)')
+            ->andWhere('t.departureTime >= :now')
+            ->andWhere('t.status NOT IN (:cancelled)')
+            ->setParameter('point', $point)
+            ->setParameter('now', new \DateTime())
+            ->setParameter('cancelled', ['annule', 'termine'])
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        if ((int)$futureTrips > 0) {
+            return $this->json([
+                'message' => 'Ce point est encore utilisé par un ou plusieurs voyages à venir. Rendez-le inactif plutôt que de le supprimer.',
+                'futureTrips' => (int)$futureTrips,
+            ], Response::HTTP_CONFLICT);
         }
 
         $this->em->remove($point);

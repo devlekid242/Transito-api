@@ -11,9 +11,11 @@ use App\Repository\AgentRepository;
 use App\Repository\AgencyPointRepository;
 use App\Repository\BusRepository;
 use App\Repository\TripRepository;
+use App\Service\DomainStateTransitionService;
 use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use App\Service\StatusMapperService;
+use App\Service\TripCancellationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -31,6 +33,8 @@ class TripController extends AbstractController
         private NotificationBroadcastService $notificationBroadcaster,
         private AdminNotificationService $adminNotificationService,
         private StatusMapperService $statusMapperService,
+        private DomainStateTransitionService $stateTransitions,
+        private TripCancellationService $tripCancellationService,
     ) {}
 
     public function index(Request $request, AgentRepository $agentRepository): JsonResponse
@@ -168,6 +172,9 @@ class TripController extends AbstractController
         if (!$bus || $bus->getAgency()?->getId() !== $agency->getId()) {
             return $this->json(['message' => 'Bus invalide ou non autorisé.'], Response::HTTP_BAD_REQUEST);
         }
+        if (!in_array($bus->getStatus(), ['disponible'], true)) {
+            return $this->json(['message' => 'Ce bus n’est pas disponible pour planifier un voyage.'], Response::HTTP_CONFLICT);
+        }
         if (!$departureCity) {
             return $this->json(['message' => 'Ville de départ invalide ou manquante.'], Response::HTTP_BAD_REQUEST);
         }
@@ -262,6 +269,29 @@ class TripController extends AbstractController
         if (!$departureTime) {
             return $this->json(['message' => 'Date/heure de départ invalide.'], Response::HTTP_BAD_REQUEST);
         }
+        if ($estimatedArrivalTime && $estimatedArrivalTime <= $departureTime) {
+            return $this->json(['message' => 'L’heure d’arrivée estimée doit être postérieure au départ.'], Response::HTTP_BAD_REQUEST);
+        }
+        if ($departureTime <= new \DateTime()) {
+            return $this->json(['message' => 'Un voyage doit être planifié dans le futur.'], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        $overlap = $this->tripRepository->createQueryBuilder('existing')
+            ->select('COUNT(existing.id)')
+            ->where('existing.bus = :bus')
+            ->andWhere('existing.status NOT IN (:cancelled)')
+            ->andWhere('existing.departureTime < :newArrival')
+            ->andWhere('COALESCE(existing.estimatedArrivalTime, existing.departureTime) > :newDeparture')
+            ->setParameter('bus', $bus)
+            ->setParameter('cancelled', ['annule', 'termine'])
+            ->setParameter('newDeparture', $departureTime)
+            ->setParameter('newArrival', $estimatedArrivalTime ?? $departureTime)
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        if ((int)$overlap > 0) {
+            return $this->json(['message' => 'Ce bus est déjà affecté à un voyage sur cette période.'], Response::HTTP_CONFLICT);
+        }
 
         $statusValue = $data['status'] ?? 'planifie';
         if (is_array($statusValue)) {
@@ -308,6 +338,43 @@ class TripController extends AbstractController
         );
 
         return $this->json($this->normalizeTrip($trip), Response::HTTP_CREATED);
+    }
+
+    #[\Symfony\Component\Routing\Attribute\Route('/api/trips/{id}/cancel', name: 'api_trip_cancel', methods: ['POST'])]
+    public function cancel(int $id, Request $request): JsonResponse
+    {
+        $trip = $this->tripRepository->find($id);
+        if (!$trip) {
+            return $this->json(['message' => 'Voyage introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        if (!$this->isAllowedAgency($trip->getAgency())) {
+            return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $actor = $this->getUser();
+        if (!$actor instanceof User) {
+            return $this->json(['message' => 'Authentification requise.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+        $reason = trim((string)($data['reason'] ?? 'Voyage annulé par l’agence'));
+
+        try {
+            $result = $this->tripCancellationService->cancel($trip, $actor, $reason);
+            return $this->json([
+                'success' => true,
+                'message' => 'Voyage annulé. Les billets concernés ont été invalidés et les demandes de remboursement ont été transmises à l’administration.',
+                'trip' => $this->normalizeTrip($result['trip']),
+                'cancelledReservations' => $result['cancelledReservations'],
+                'refundRequests' => $result['refundRequests'],
+                'refundAmountPending' => $result['refundedAmount'],
+            ]);
+        } catch (\RuntimeException $e) {
+            return $this->json(['message' => $e->getMessage()], Response::HTTP_UNPROCESSABLE_ENTITY);
+        } catch (\Throwable $e) {
+            return $this->json(['message' => 'Impossible d’annuler ce voyage pour le moment.'], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
     }
 
     public function update(int $id, Request $request): JsonResponse
@@ -456,7 +523,31 @@ class TripController extends AbstractController
             $trip->setDriverName($data['driverName']);
         }
         if (array_key_exists('status', $data)) {
-            $trip->setStatus($this->statusMapperService->normalizeTripStatus((string)$data['status']));
+            $requestedStatus = $this->statusMapperService->normalizeTripStatus((string)$data['status']);
+            if ($requestedStatus === 'annule' && $previousStatus !== 'annule') {
+                $actor = $this->getUser();
+                if (!$actor instanceof User) {
+                    return $this->json(['message' => 'Authentification requise.'], Response::HTTP_UNAUTHORIZED);
+                }
+                try {
+                    $result = $this->tripCancellationService->cancel(
+                        $trip,
+                        $actor,
+                        trim((string)($data['cancellationReason'] ?? 'Voyage annulé par l’agence'))
+                    );
+                    return $this->json([
+                        'success' => true,
+                        'message' => 'Voyage annulé et remboursements transmis à l’administration.',
+                        'trip' => $this->normalizeTrip($result['trip']),
+                        'cancelledReservations' => $result['cancelledReservations'],
+                        'refundRequests' => $result['refundRequests'],
+                        'refundAmountPending' => $result['refundedAmount'],
+                    ]);
+                } catch (\RuntimeException $e) {
+                    return $this->json(['message' => $e->getMessage()], Response::HTTP_UNPROCESSABLE_ENTITY);
+                }
+            }
+            $this->stateTransitions->transitionTrip($trip, $requestedStatus);
         }
         if (array_key_exists('seatsReserved', $data)) {
             $trip->setSeatsReserved((int)$data['seatsReserved']);
@@ -781,6 +872,7 @@ class TripController extends AbstractController
             'maxSeats' => $trip->getBus()?->getCapacity() ?? 0,
             'availableSeats' => max(0, ($trip->getBus()?->getCapacity() ?? 0) - $trip->getSeatsReserved()),
             'pricePerSeat' => (float)$trip->getPrice(),
+            'pricePerSeatAmount' => (string)$trip->getPrice(),
             'agencyName' => $trip->getAgency()?->getName(),
             'agencyLogo' => $trip->getAgency()?->getLogoUrl(),
             'bus' => [

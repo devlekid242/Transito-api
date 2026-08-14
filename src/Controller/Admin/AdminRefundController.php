@@ -2,9 +2,12 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+
 use App\Entity\Agency;
 use App\Entity\PaymentLog;
 use App\Entity\RefundRequest;
+use App\Entity\ReservationReschedule;
 use App\Entity\Reservation;
 use App\Entity\User;
 use App\Entity\Wallet;
@@ -13,7 +16,10 @@ use App\Repository\RefundRequestRepository;
 use App\Repository\ReservationRepository;
 use App\Repository\WalletRepository;
 use App\Repository\WalletTransactionRepository;
+use App\Service\DomainStateTransitionService;
+use App\Service\AuditLogger;
 use App\Service\WalletService;
+use App\Service\RescheduleService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -34,7 +40,8 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * ('ROLE_SUPER_ADMIN', etc.) à votre hiérarchie de rôles réelle.
  */
 #[Route('/api/admin/refunds')]
-// #[IsGranted('ROLE_ADMIN')]
+#[IsGranted(AdminRoleVoter::FINANCE)]
+#[IsGranted('ROLE_ADMIN')]
 class AdminRefundController extends AbstractController
 {
     public function __construct(
@@ -45,6 +52,9 @@ class AdminRefundController extends AbstractController
         private AgencyRepository $agencyRepository,
         private WalletRepository $walletRepository,
         private WalletTransactionRepository $walletTransactionRepository,
+        private DomainStateTransitionService $stateTransitions,
+        private AuditLogger $auditLogger,
+        private RescheduleService $rescheduleService,
     ) {
         // Inject repositories into wallet service for advanced features
         $this->walletService->setRefundRequestRepository($this->refundRequestRepository);
@@ -265,12 +275,20 @@ class AdminRefundController extends AbstractController
                 'message' => 'Fonds insuffisants pour traiter ce remboursement standard. Utilisez le remboursement forcé si nécessaire.',
                 'requiresForce' => true,
                 'agentAvailableBalance' => $this->getAgentAvailableBalance($refundRequest),
+                'agentBlockedBalance' => $this->getAgentBlockedBalance($refundRequest),
+                'mobilisableBalance' => $this->getAgentAvailableBalance($refundRequest) + $this->getAgentBlockedBalance($refundRequest),
                 'refundAmount' => (float) $refundRequest->getRequestedAmount(),
             ], Response::HTTP_CONFLICT);
         }
 
         try {
             $result = $this->processRefund($refundRequest, $currentAdmin, $adminNote, false);
+            $this->em->flush();
+            $this->auditLogger->record('REFUND_COMPLETED', 'RefundRequest', (string) $refundRequest->getId(),
+                ['status' => RefundRequest::STATUS_PENDING],
+                ['status' => $refundRequest->getStatus(), 'refundedAmount' => $refundRequest->getRefundedAmount()],
+                ['source' => 'admin.refund.process-standard', 'reservationId' => $refundRequest->getReservation()?->getId(), 'transactionId' => $result['transactionId']]
+            );
             $this->em->flush();
 
             return new JsonResponse([
@@ -313,6 +331,12 @@ class AdminRefundController extends AbstractController
 
         try {
             $result = $this->processRefund($refundRequest, $currentAdmin, $adminNote, true);
+            $this->em->flush();
+            $this->auditLogger->record('REFUND_FORCE_COMPLETED', 'RefundRequest', (string) $refundRequest->getId(),
+                ['status' => RefundRequest::STATUS_PENDING],
+                ['status' => $refundRequest->getStatus(), 'refundedAmount' => $refundRequest->getRefundedAmount()],
+                ['source' => 'admin.refund.process-forced', 'reservationId' => $refundRequest->getReservation()?->getId(), 'transactionId' => $result['transactionId'], 'force' => true]
+            );
             $this->em->flush();
 
             $wallet = $this->walletRepository->findOneBy(['agency' => $refundRequest->getAgency()]);
@@ -373,7 +397,12 @@ class AdminRefundController extends AbstractController
             return new JsonResponse(['message' => 'Un motif de rejet est obligatoire.'], Response::HTTP_BAD_REQUEST);
         }
 
-        $refundRequest->setStatus(RefundRequest::STATUS_REJECTED);
+        $this->stateTransitions->transitionRefund($refundRequest, RefundRequest::STATUS_REJECTED);
+        $reschedule = $refundRequest->getReschedule();
+        if ($reschedule && $reschedule->getStatus() === ReservationReschedule::STATUS_REFUND_REQUIRED) {
+            $reschedule->setStatus(ReservationReschedule::STATUS_FAILED);
+            $this->em->persist($reschedule);
+        }
         $refundRequest->setProcessedAt(new \DateTime());
         $refundRequest->setProcessedByAdmin($currentAdmin);
         $refundRequest->setAdminNote($adminNote);
@@ -400,6 +429,12 @@ class AdminRefundController extends AbstractController
             }
         }
 
+        $this->em->flush();
+        $this->auditLogger->record('REFUND_REJECTED', 'RefundRequest', (string) $refundRequest->getId(),
+            ['status' => RefundRequest::STATUS_PENDING],
+            ['status' => $refundRequest->getStatus()],
+            ['source' => 'admin.refund.reject', 'reason' => $adminNote]
+        );
         $this->em->flush();
 
         return new JsonResponse([
@@ -464,7 +499,7 @@ class AdminRefundController extends AbstractController
         $refundRequest->setRequestedBy($user);
         $refundRequest->setRequestedAmount((string) $data['amount']);
         $refundRequest->setReason($data['reason']);
-        $refundRequest->setStatus(RefundRequest::STATUS_PENDING);
+        $this->stateTransitions->transitionRefund($refundRequest, RefundRequest::STATUS_PENDING);
         $refundRequest->setAdminNote($data['adminNote'] ?? 'Créé manuellement par admin');
 
         $this->em->persist($refundRequest);
@@ -614,9 +649,18 @@ class AdminRefundController extends AbstractController
         // le traitement standard échouait ensuite (ou inversement).
         $netAmount = $this->calculateNetRefundAmount($refundRequest);
         $availableBalance = (float) $wallet->getAvailableBalance();
+        $blockedBalance = (float) $wallet->getBlockedBalance();
 
-        // Standard refund requires sufficient available balance
-        return $availableBalance >= $netAmount;
+        // A reschedule refund is backed by the price adjustment held in the
+        // agency's blocked balance. It must not mobilize unrelated available
+        // funds or the original reservation credit.
+        if ($refundRequest->getReschedule()) {
+            return $blockedBalance >= $netAmount;
+        }
+
+        // Un remboursement avant embarquement débite d'abord le solde bloqué,
+        // puis le disponible. La solvabilité doit donc considérer les deux.
+        return ($availableBalance + $blockedBalance) >= $netAmount;
     }
 
     /**
@@ -631,6 +675,20 @@ class AdminRefundController extends AbstractController
 
         $wallet = $this->walletRepository->findOneBy(['agency' => $agency]);
         return $wallet ? (float) $wallet->getAvailableBalance() : 0.0;
+    }
+
+    /**
+     * Calculate net refund amount (amount minus platform fee if applicable)
+     */
+    private function getAgentBlockedBalance(RefundRequest $refundRequest): float
+    {
+        $agency = $refundRequest->getAgency();
+        if (!$agency) {
+            return 0.0;
+        }
+
+        $wallet = $this->walletRepository->findOneBy(['agency' => $agency]);
+        return $wallet ? (float) $wallet->getBlockedBalance() : 0.0;
     }
 
     /**
@@ -683,6 +741,25 @@ class AdminRefundController extends AbstractController
      */
     private function processRefund(RefundRequest $refundRequest, User $admin, ?string $adminNote, bool $isForced): array
     {
+        $connection = $this->em->getConnection();
+        $startedHere = !$connection->isTransactionActive();
+        if ($startedHere) {
+            $connection->beginTransaction();
+        }
+
+        try {
+            // Toutes les écritures financières de remboursement sont sérialisées
+        // sur la demande. Cela évite qu'un double-clic ou un retry réseau ne
+        // puisse débiter deux fois le même wallet.
+        $locked = $this->em->getRepository(RefundRequest::class)->find(
+            $refundRequest->getId(),
+            \Doctrine\ORM\LockMode::PESSIMISTIC_WRITE
+        );
+        if (!$locked || $locked->getStatus() !== RefundRequest::STATUS_PENDING) {
+            throw new \RuntimeException('Cette demande de remboursement a déjà été traitée.');
+        }
+        $refundRequest = $locked;
+
         $agency = $refundRequest->getAgency();
         if (!$agency) {
             throw new \RuntimeException('Agence introuvable pour cette demande de remboursement.');
@@ -710,13 +787,16 @@ class AdminRefundController extends AbstractController
         $wallet = $this->getOrCreateWallet($agency);
         $netAmount = $this->calculateNetRefundAmount($refundRequest);
 
-        // For standard refunds, verify sufficient funds BEFORE attempting the debit
+        // Un remboursement avant embarquement débite d'abord le bloqué puis
+        // le disponible. Le contrôle doit donc refléter exactement debitForRefund().
         if (!$isForced) {
-            $availableBalance = (float) $wallet->getAvailableBalance();
-            if ($availableBalance < $netAmount) {
+            $available = $wallet->getAvailableBalance();
+            $blocked = $wallet->getBlockedBalance();
+            $totalRefundable = bcadd($available, $blocked, 2);
+            if (bccomp($totalRefundable, $netAmount, 2) < 0) {
                 throw new \RuntimeException(sprintf(
-                    'Fonds insuffisants pour le remboursement standard. Solde disponible: %.2f XAF, Montant requis: %.2f XAF',
-                    $availableBalance,
+                    'Fonds insuffisants pour le remboursement standard. Fonds mobilisables: %s XAF, Montant requis: %s XAF',
+                    $totalRefundable,
                     $netAmount
                 ));
             }
@@ -724,13 +804,35 @@ class AdminRefundController extends AbstractController
 
         $reason = $adminNote ?? ($isForced ? 'Remboursement forcé par admin' : 'Remboursement standard');
 
-        // 👈 Point d'écriture UNIQUE. $allowNegative = $isForced permet au
-        // remboursement forcé de faire passer le solde en négatif plutôt que
-        // de le plafonner silencieusement, pour refléter une vraie dette.
-        $tx = $this->walletService->debitForRefund($reservation, $reason, $isForced);
+        // Point d'écriture UNIQUE. A reschedule refund is different from a
+        // normal booking refund: the adjustment amount is already represented
+        // by the reservation's blocked agency balance. Calling debitForRefund()
+        // here would refund the FULL original booking amount.
+        $reschedule = $refundRequest->getReschedule();
+        if ($reschedule) {
+            if ($reschedule->getStatus() !== ReservationReschedule::STATUS_REFUND_REQUIRED) {
+                throw new \RuntimeException('Le report associé n’est plus en attente de remboursement.');
+            }
+            $difference = $reschedule->getDifference();
+            if (bccomp($difference, '0.00', 2) >= 0) {
+                throw new \RuntimeException('Le report associé ne nécessite pas de remboursement.');
+            }
+            $expected = bcsub('0.00', $difference, 2);
+            if (bccomp($expected, (string) $refundRequest->getRequestedAmount(), 2) !== 0) {
+                throw new \RuntimeException('Le montant du remboursement de report ne correspond pas à la différence de prix.');
+            }
+            $tx = $this->walletService->applyRescheduleAdjustment($reservation, $difference);
+            if (!$tx) {
+                throw new \RuntimeException('Impossible de débiter la différence de report.');
+            }
+        } else {
+            // Standard reservation refund. $allowNegative = $isForced allows
+            // the forced workflow to represent an actual agency debt.
+            $tx = $this->walletService->debitForRefund($reservation, $reason, $isForced);
 
-        if (!$tx) {
-            throw new \RuntimeException('Aucun crédit trouvé pour cette réservation — impossible de déterminer le montant à rembourser.');
+            if (!$tx) {
+                throw new \RuntimeException('Aucun crédit trouvé pour cette réservation — impossible de déterminer le montant à rembourser.');
+            }
         }
 
         // Enrichir la transaction avec la traçabilité admin (WalletService
@@ -772,7 +874,7 @@ class AdminRefundController extends AbstractController
         // réellement débité du portefeuille ($tx->getAmount()), et non plus
         // le montant brut demandé (RefundRequest::requestedAmount) — c'était
         // une incohérence de reporting entre ce champ et le grand livre.
-        $refundRequest->setStatus(RefundRequest::STATUS_COMPLETED);
+        $this->stateTransitions->transitionRefund($refundRequest, RefundRequest::STATUS_COMPLETED);
         $refundRequest->setRefundedAmount($tx->getAmount());
         $refundRequest->setProcessedAt(new \DateTime());
         $refundRequest->setProcessedByAdmin($admin);
@@ -780,17 +882,35 @@ class AdminRefundController extends AbstractController
 
         $this->em->persist($refundRequest);
 
-        // Garder la réservation synchronisée si elle ne l'était pas déjà
-        // (cas d'un remboursement créé manuellement sans passer par cancel())
-        if ($reservation->getPaymentStatus() !== 'rembourse') {
-            $reservation->setPaymentStatus('rembourse');
+        if ($reschedule) {
+            $this->rescheduleService->finalize($reschedule);
+        }
+
+        // A reschedule refund does NOT cancel/refund the original reservation.
+        // It only settles the price difference; the reservation is finalized
+        // onto the new trip after the financial adjustment succeeds.
+        if (!$reschedule && $reservation->getPaymentStatus() !== 'rembourse') {
+            $this->stateTransitions->transitionReservationPayment($reservation, 'rembourse');
             $this->em->persist($reservation);
         }
 
-        return [
-            'newBalance' => (float) $wallet->getAvailableBalance(),
-            'transactionId' => $tx->getId(),
-        ];
+            $result = [
+                'newBalance' => $wallet->getAvailableBalance(),
+                'transactionId' => $tx->getId(),
+            ];
+
+            $this->em->flush();
+            if ($startedHere) {
+                $connection->commit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            if ($startedHere && $connection->isTransactionActive()) {
+                $connection->rollBack();
+            }
+            throw $e;
+        }
     }
 
     /**

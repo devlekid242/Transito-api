@@ -30,12 +30,12 @@ class WalletRepository extends ServiceEntityRepository
     }
 
     /** 
-     * Get total balance across all wallets (available + reserved).
+     * Get total balance across all wallets (available + reserved + blocked).
      */
     public function getTotalBalance(): string
     {
         $result = $this->createQueryBuilder('w')
-            ->select('SUM(w.reservedBalance + w.availableBalance) as total')
+            ->select('SUM(w.reservedBalance + w.availableBalance + w.blockedBalance) as total')
             ->getQuery()
             ->getSingleScalarResult();
 
@@ -57,6 +57,34 @@ class WalletRepository extends ServiceEntityRepository
         return $result ?? '0.00';
     }
 
+
+    /** Return the platform wallet balance pockets without mixing agency funds. */
+    public function getPlatformWalletSummary(): array
+    {
+        $row = $this->createQueryBuilder('w')
+            ->select('w.id AS id, w.availableBalance AS available, w.blockedBalance AS blocked, w.reservedBalance AS reserved, w.totalEarned AS earned, w.totalWithdrawn AS withdrawn')
+            ->where('w.type = :type')
+            ->setParameter('type', Wallet::TYPE_PLATFORM)
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        if (!$row) {
+            return [
+                'id' => null, 'available' => '0.00', 'blocked' => '0.00',
+                'reserved' => '0.00', 'earned' => '0.00', 'withdrawn' => '0.00',
+            ];
+        }
+
+        return [
+            'id' => $row['id'],
+            'available' => (string) ($row['available'] ?? '0.00'),
+            'blocked' => (string) ($row['blocked'] ?? '0.00'),
+            'reserved' => (string) ($row['reserved'] ?? '0.00'),
+            'earned' => (string) ($row['earned'] ?? '0.00'),
+            'withdrawn' => (string) ($row['withdrawn'] ?? '0.00'),
+        ];
+    }
+
     /**
      * Find agencies with low available balance.
      */
@@ -75,42 +103,17 @@ class WalletRepository extends ServiceEntityRepository
 
     /**
      * Get total blocked balance across all agency wallets.
-     * This requires calculation using RefundRequest and Ticket repositories.
      */
-    public function getTotalBlockedBalance(
-        RefundRequestRepository $refundRequestRepository,
-        TicketRepository $ticketRepository
-    ): float {
-        // On sélectionne l'alias racine (w) ainsi que l'agence jointe (a)
-        $wallets = $this->createQueryBuilder('w')
-            ->select('w', 'a')
-            ->join('w.agency', 'a')
+    public function getTotalBlockedBalance(): string
+    {
+        $result = $this->createQueryBuilder('w')
+            ->select('SUM(w.blockedBalance) as total')
             ->where('w.type = :type')
             ->setParameter('type', Wallet::TYPE_AGENCY)
             ->getQuery()
-            ->getResult();
+            ->getSingleScalarResult();
 
-        $totalBlocked = 0.0;
-        $processedAgencyIds = [];
-
-        foreach ($wallets as $wallet) {
-            $agency = $wallet->getAgency();
-
-            // On s'assure de ne traiter chaque agence qu'une seule fois
-            if ($agency && !in_array($agency->getId(), $processedAgencyIds, true)) {
-                $processedAgencyIds[] = $agency->getId();
-
-                // Sum pending refunds for this agency
-                $pendingRefunds = $refundRequestRepository->getPendingRefundsAmountForAgency($agency);
-                $totalBlocked += $pendingRefunds;
-
-                // Sum unvalidated tickets for this agency  
-                $unvalidatedTickets = $ticketRepository->getUnvalidatedTicketsAmountForAgency($agency);
-                $totalBlocked += $unvalidatedTickets;
-            }
-        }
-
-        return round($totalBlocked, 2);
+        return $result ?? '0.00';
     }
 
     /**
@@ -131,17 +134,12 @@ class WalletRepository extends ServiceEntityRepository
             ->getResult();
 
         $result = [];
-        foreach ($wallets as $walletItem) {
-            $wallet = $walletItem;
+        foreach ($wallets as $wallet) {
             $agency = $wallet->getAgency();
 
             if ($agency) {
-                // Calculate blocked balance
                 $pendingRefunds = $refundRequestRepository->getPendingRefundsAmountForAgency($agency);
                 $unvalidatedTickets = $ticketRepository->getUnvalidatedTicketsAmountForAgency($agency);
-                $blockedBalance = $pendingRefunds + $unvalidatedTickets;
-
-                // Get reserved balance (from pending withdrawals)
                 $pendingWithdrawalsAmount = $withdrawalRequestRepository->getPendingWithdrawalsAmountForAgency($agency);
 
                 $result[] = [
@@ -149,8 +147,10 @@ class WalletRepository extends ServiceEntityRepository
                     'agency' => $agency,
                     'available' => (float) $wallet->getAvailableBalance(),
                     'reserved' => (float) $wallet->getReservedBalance(),
-                    'blocked' => $blockedBalance,
-                    'total' => (float) bcadd($wallet->getAvailableBalance(), $wallet->getReservedBalance(), 2),
+                    'blocked' => (float) $wallet->getBlockedBalance(),
+                    'total' => (float) $wallet->getTotalBalance(),
+                    'totalEarned' => (float) $wallet->getTotalEarned(),
+                    'totalWithdrawn' => (float) $wallet->getTotalWithdrawn(),
                     'frozen' => $wallet->isFrozen(),
                     'pendingWithdrawals' => (float) $pendingWithdrawalsAmount,
                     'pendingRefunds' => $pendingRefunds,

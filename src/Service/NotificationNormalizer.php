@@ -39,4 +39,11 @@ class NotificationNormalizer
             'createdAt' => $notification->getCreatedAt()?->format(\DateTimeInterface::ATOM),
         ];
     }
+    public function normalizeForUser(Notification $notification, bool $isRead): array
+    {
+        $data = $this->normalize($notification);
+        $data['isRead'] = $isRead;
+        return $data;
+    }
+
 }

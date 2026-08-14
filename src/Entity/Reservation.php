@@ -22,7 +22,7 @@ use Symfony\Component\Validator\Constraints as Assert;
     normalizationContext: ['groups' => ['reservation:read']],
     denormalizationContext: ['groups' => ['reservation:write']],
     operations: [
-        new GetCollection(),
+        new GetCollection(security: "is_granted('ROLE_ADMIN')"),
         new Get(
             uriTemplate: '/bookings/my-bookings',
             controller: BookingController::class . '::myBookings',
@@ -82,7 +82,7 @@ class Reservation
     private ?string $paymentMethod = null;
 
     #[ORM\Column(name: 'payment_status', length: 30, options: ['default' => 'en_attente'])]
-    #[Assert\Choice(choices: ['en_attente', 'paye', 'echoue', 'rembourse', 'annule'], message: "Statut de paiement invalide.")]
+    #[Assert\Choice(choices: ['en_attente', 'paye', 'echoue', 'rembourse', 'annule', 'no_show'], message: "Statut de paiement invalide.")]
     #[Groups(['reservation:read', 'reservation:write'])]
     private string $paymentStatus = 'en_attente';
 
@@ -93,6 +93,16 @@ class Reservation
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['reservation:read'])]
     private ?\DateTimeInterface $createdAt = null;
+
+    #[ORM\Column(name: 'payment_expires_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    #[Groups(['reservation:read'])]
+    private ?\DateTimeInterface $paymentExpiresAt = null;
+
+    #[ORM\Column(name: 'reschedule_count', type: 'integer', options: ['default' => 0])]
+    private int $rescheduleCount = 0;
+
+    #[ORM\Column(name: 'last_rescheduled_at', nullable: true)]
+    private ?\DateTimeInterface $lastRescheduledAt = null;
 
     #[ORM\OneToMany(targetEntity: \App\Entity\Ticket::class, mappedBy: 'reservation', cascade: ['persist', 'remove'], orphanRemoval: true)]
     private Collection $tickets;
@@ -182,6 +192,47 @@ class Reservation
     public function setTransactionReference(?string $transactionReference): static
     {
         $this->transactionReference = $transactionReference;
+        return $this;
+    }
+
+    public function getPaymentExpiresAt(): ?\DateTimeInterface
+    {
+        return $this->paymentExpiresAt;
+    }
+
+    public function setPaymentExpiresAt(?\DateTimeInterface $paymentExpiresAt): static
+    {
+        $this->paymentExpiresAt = $paymentExpiresAt;
+        return $this;
+    }
+
+    public function isPaymentExpired(?\DateTimeInterface $now = null): bool
+    {
+        $now ??= new \DateTime();
+        return $this->paymentStatus === 'en_attente'
+            && $this->paymentExpiresAt !== null
+            && $this->paymentExpiresAt <= $now;
+    }
+
+    public function getRescheduleCount(): int
+    {
+        return $this->rescheduleCount;
+    }
+
+    public function incrementRescheduleCount(): static
+    {
+        ++$this->rescheduleCount;
+        return $this;
+    }
+
+    public function getLastRescheduledAt(): ?\DateTimeInterface
+    {
+        return $this->lastRescheduledAt;
+    }
+
+    public function setLastRescheduledAt(?\DateTimeInterface $lastRescheduledAt): static
+    {
+        $this->lastRescheduledAt = $lastRescheduledAt;
         return $this;
     }
 

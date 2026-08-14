@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Admin;
 use App\Entity\User;
 use App\Repository\AdminRepository;
@@ -15,6 +18,7 @@ use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use Symfony\Component\Routing\Attribute\Route;
 
 #[Route('/api/admin/admins')]
+#[IsGranted(AdminRoleVoter::SUPER)]
 class AdminAdminController extends AbstractController
 {
     public function __construct(
@@ -68,6 +72,30 @@ class AdminAdminController extends AbstractController
                 'totalPages' => (int) ceil($total / $limit),
             ],
         ]);
+    }
+
+    #[Route('/kpis', name: 'api_admin_admins_kpis', methods: ['GET'])]
+    public function getAdminKpis(): JsonResponse 
+    {
+        // count SuperAdmin user
+        $superAdmin = $this->adminRepository->count(['adminRole' => 'SUPER_ADMIN']);
+        $financeAdmin = $this->adminRepository->count(['adminRole' => 'FINANCE_ADMIN']);
+        $moderationAdmin = $this->adminRepository->count(['adminRole' => 'MODERATION_ADMIN']);
+        $supportAdmin = $this->adminRepository->count(['adminRole' => 'SUPPORT_ADMIN']);
+
+        $totalAdmins = $superAdmin + $financeAdmin + $moderationAdmin + $supportAdmin;
+
+        return $this->json([
+            'success' => true,
+            'data' => [
+                'superAdmin' => $superAdmin,
+                'financeAdmin' => $financeAdmin,
+                'moderationAdmin' => $moderationAdmin,
+                'supportAdmin' => $supportAdmin,
+                'total' => $totalAdmins,
+            ],
+        ]);
+
     }
 
     #[Route('', name: 'api_admin_admins_create', methods: ['POST'])]

@@ -22,48 +22,56 @@ use Symfony\Component\Validator\Constraints as Assert;
     normalizationContext: ['groups' => ['withdrawal:read']],
     denormalizationContext: ['groups' => ['withdrawal:write']],
     operations: [
-        new GetCollection(),
-        new Get(),
+        new GetCollection(security: "is_granted('ROLE_ADMIN') or is_granted('ROLE_PARTNER')"),
+        new Get(security: "is_granted('ROLE_ADMIN') or object.getRequestedBy() == user"),
         new Post(
             uriTemplate: '/partner/withdrawals',
             controller: PartnerFinanceController::class . '::createWithdrawal',
-            name: 'api_partner_withdrawals_create'
+            name: 'api_partner_withdrawals_create',
+            security: "is_granted('ROLE_PARTNER') or is_granted('ROLE_ADMIN')"
         ),
         new Get(
             uriTemplate: '/partner/withdrawals/{id}',
             controller: PartnerFinanceController::class . '::getWithdrawal',
-            name: 'api_partner_withdrawals_detail'
+            name: 'api_partner_withdrawals_detail',
+            security: "is_granted('ROLE_PARTNER') or is_granted('ROLE_ADMIN')"
         ),
         new GetCollection(
             uriTemplate: '/partner/withdrawals',
             controller: PartnerFinanceController::class . '::listWithdrawals',
-            name: 'api_partner_withdrawals_list'
+            name: 'api_partner_withdrawals_list',
+            security: "is_granted('ROLE_PARTNER') or is_granted('ROLE_ADMIN')"
         ),
         // Traitement admin : ces routes gèrent les demandes de retrait côté administration
         new GetCollection(
             uriTemplate: '/admin/withdrawals',
             controller: AdminWithdrawalController::class . '::list',
-            name: 'api_admin_withdrawals_list'
+            name: 'api_admin_withdrawals_list',
+            security: "is_granted('ROLE_ADMIN')"
         ),
         new Get(
             uriTemplate: '/admin/withdrawals/{id}',
             controller: AdminWithdrawalController::class . '::detail',
-            name: 'api_admin_withdrawals_detail'
+            name: 'api_admin_withdrawals_detail',
+            security: "is_granted('ROLE_ADMIN')"
         ),
         new Get(
             uriTemplate: '/admin/withdrawals/{id}/check-solvency',
             controller: AdminWithdrawalController::class . '::checkSolvency',
-            name: 'api_admin_withdrawals_check_solvency'
+            name: 'api_admin_withdrawals_check_solvency',
+            security: "is_granted('ROLE_ADMIN')"
         ),
         new Post(
             uriTemplate: '/admin/withdrawals/{id}/approve',
             controller: AdminWithdrawalController::class . '::approve',
-            name: 'api_admin_withdrawals_approve'
+            name: 'api_admin_withdrawals_approve',
+            security: "is_granted('ROLE_ADMIN')"
         ),
         new Post(
             uriTemplate: '/admin/withdrawals/{id}/reject',
             controller: AdminWithdrawalController::class . '::reject',
-            name: 'api_admin_withdrawals_reject'
+            name: 'api_admin_withdrawals_reject',
+            security: "is_granted('ROLE_ADMIN')"
         )
     ]
 )]
@@ -100,6 +108,11 @@ class WithdrawalRequest
     #[Assert\NotBlank(message: 'La méthode de retrait est obligatoire.')]
     #[Groups(['withdrawal:read', 'withdrawal:write'])]
     private ?string $method = null;
+
+    // Empêche les doublons de demande lors d'un double clic ou d'un retry réseau.
+    #[ORM\Column(name: 'idempotency_key', length: 100, nullable: true, unique: true)]
+    #[Groups(['withdrawal:read'])]
+    private ?string $idempotencyKey = null;
 
     // pending | approved | rejected
     #[ORM\Column(length: 50)]
@@ -180,6 +193,17 @@ class WithdrawalRequest
     public function getMethod(): ?string
     {
         return $this->method;
+    }
+
+    public function getIdempotencyKey(): ?string
+    {
+        return $this->idempotencyKey;
+    }
+
+    public function setIdempotencyKey(?string $idempotencyKey): static
+    {
+        $this->idempotencyKey = $idempotencyKey;
+        return $this;
     }
 
     public function setMethod(string $method): static

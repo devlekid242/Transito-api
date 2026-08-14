@@ -188,4 +188,37 @@ class AdminActivityLogRepository extends ServiceEntityRepository
 //            ->getOneOrNullResult()
 //        ;
 //    }
+    /**
+     * Global audit feed for Super Admin. Supports filtering by type, action,
+     * target entity and date range without exposing entity relations directly.
+     */
+    public function findGlobal(
+        int $page = 1,
+        int $limit = 50,
+        ?string $actionType = null,
+        ?string $action = null,
+        ?string $targetEntity = null,
+        ?\DateTimeInterface $from = null,
+        ?\DateTimeInterface $to = null
+    ): array {
+        $page = max(1, $page);
+        $limit = min(100, max(1, $limit));
+
+        $qb = $this->createQueryBuilder('l');
+        if ($actionType) { $qb->andWhere('l.actionType = :actionType')->setParameter('actionType', $actionType); }
+        if ($action) { $qb->andWhere('l.action LIKE :action')->setParameter('action', '%'.$action.'%'); }
+        if ($targetEntity) { $qb->andWhere('l.targetEntity = :targetEntity')->setParameter('targetEntity', $targetEntity); }
+        if ($from) { $qb->andWhere('l.createdAt >= :from')->setParameter('from', $from); }
+        if ($to) { $qb->andWhere('l.createdAt <= :to')->setParameter('to', $to); }
+
+        $countQb = clone $qb;
+        $total = (int) $countQb->select('COUNT(l.id)')->getQuery()->getSingleScalarResult();
+        $logs = $qb->orderBy('l.createdAt', 'DESC')
+            ->setFirstResult(($page - 1) * $limit)
+            ->setMaxResults($limit)
+            ->getQuery()->getResult();
+
+        return ['logs' => $logs, 'total' => $total, 'page' => $page, 'limit' => $limit, 'pages' => max(1, (int) ceil($total / $limit))];
+    }
+
 }

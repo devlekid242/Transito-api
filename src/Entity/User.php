@@ -24,7 +24,9 @@ use Symfony\Component\Validator\Constraints as Assert;
 #[ORM\UniqueConstraint(name: 'UNIQ_IDENTIFIER_EMAIL', fields: ['email'])] 
 #[ApiResource(
     operations: [
-        new GetCollection(),
+        new GetCollection(
+            security: "is_granted('ROLE_ADMIN')"
+        ),
         new GetCollection(
             uriTemplate: '/users/staff',
             controller: UserController::class . '::getStaffUsers',
@@ -86,7 +88,7 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     private ?string $phoneNumber = null;
 
     /* NOUVEAU CHAMP : VILLE DE RÉSIDENCE */
-    #[ORM\Column(name: 'ville_residence', length: 100)]
+    #[ORM\Column(name: 'ville_residence', length: 100, nullable: true)]
     #[Assert\NotBlank(message: "La ville de résidence est obligatoire.")]
     #[Groups(['user:write'])]
     private ?string $villeResidence = null;
@@ -150,6 +152,12 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
 
     #[ORM\Column(name: 'password_reset_expires_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $passwordResetExpiresAt = null;
+
+    #[ORM\Column(name: 'otp_attempts', type: Types::SMALLINT, options: ['default' => 0])]
+    private int $otpAttempts = 0;
+
+    #[ORM\Column(name: 'otp_requested_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $otpRequestedAt = null;
 
     #[ORM\Column(name: 'last_login_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $lastLoginAt = null;
@@ -422,6 +430,28 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function setPasswordResetCode(?string $code): static
     {
         $this->passwordResetCode = $code;
+        return $this;
+    }
+
+    public function getOtpAttempts(): int
+    {
+        return $this->otpAttempts;
+    }
+
+    public function setOtpAttempts(int $attempts): static
+    {
+        $this->otpAttempts = $attempts;
+        return $this;
+    }
+
+    public function getOtpRequestedAt(): ?\DateTimeInterface
+    {
+        return $this->otpRequestedAt;
+    }
+
+    public function setOtpRequestedAt(?\DateTimeInterface $requestedAt): static
+    {
+        $this->otpRequestedAt = $requestedAt;
         return $this;
     }
 

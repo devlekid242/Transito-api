@@ -209,6 +209,24 @@ class BusController extends AbstractController
             return $this->json(['message' => 'Accès refusé à ce bus.'], Response::HTTP_FORBIDDEN);
         }
 
+        $futureTrips = $this->em->getRepository(\App\Entity\Trip::class)->createQueryBuilder('t')
+            ->select('COUNT(t.id)')
+            ->where('t.bus = :bus')
+            ->andWhere('t.departureTime >= :now')
+            ->andWhere('t.status NOT IN (:cancelled)')
+            ->setParameter('bus', $bus)
+            ->setParameter('now', new \DateTime())
+            ->setParameter('cancelled', ['annule', 'termine'])
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        if ((int)$futureTrips > 0) {
+            return $this->json([
+                'message' => 'Ce bus est encore affecté à un ou plusieurs voyages à venir. Désaffectez-le ou rendez-le inactif avant de le supprimer.',
+                'futureTrips' => (int)$futureTrips,
+            ], Response::HTTP_CONFLICT);
+        }
+
         $this->em->remove($bus);
         $this->em->flush();
 

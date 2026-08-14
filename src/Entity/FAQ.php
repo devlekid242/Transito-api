@@ -3,29 +3,11 @@
 namespace App\Entity;
 
 use Doctrine\ORM\Mapping as ORM;
-use ApiPlatform\Metadata\ApiResource;
-use ApiPlatform\Metadata\Get;
-use ApiPlatform\Metadata\GetCollection;
-use ApiPlatform\Metadata\Post;
-use ApiPlatform\Metadata\Put;
-use ApiPlatform\Metadata\Delete;
 use Symfony\Component\Validator\Constraints as Assert;
 
 #[ORM\Entity]
 #[ORM\Table(name: '`faqs`')]
-#[ApiResource(
-    operations: [
-        // Lecture publique : consultation des FAQ actives par les usagers
-        new GetCollection(),
-        new Get(),
 
-        // Écriture réservée aux administrateurs (corrige l'absence totale de contrôle d'accès)
-        new Post(security: "is_granted('ROLE_ADMIN')"),
-        new Put(security: "is_granted('ROLE_ADMIN')"),
-        new Delete(security: "is_granted('ROLE_ADMIN')"),
-    ],
-    securityMessage: 'Accès réservé aux administrateurs.'
-)]
 class FAQ
 {
     #[ORM\Id]

@@ -2,6 +2,9 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\AdminRoleVoter;
+use Symfony\Component\Security\Http\Attribute\IsGranted;
+
 use App\Entity\Agent;
 use App\Entity\Admin;
 use App\Entity\PaymentLog;
@@ -27,6 +30,7 @@ use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
  * Provides endpoints for listing, filtering, and managing platform users (Clients and Agents).
  */
 #[Route('/api/admin/users')]
+#[IsGranted(AdminRoleVoter::MODERATION)]
 class AdminUserController extends AbstractController
 {
     public function __construct(

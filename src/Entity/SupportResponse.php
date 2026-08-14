@@ -3,39 +3,12 @@
 namespace App\Entity;
 
 use Doctrine\ORM\Mapping as ORM;
-use ApiPlatform\Metadata\ApiResource;
-use ApiPlatform\Metadata\GetCollection;
-use ApiPlatform\Metadata\Post;
-use App\Controller\SupportController;
+use Doctrine\DBAL\Types\Types;
+
 
 #[ORM\Entity]
 #[ORM\Table(name: '`support_responses`')]
-#[ApiResource(
-    operations: [
-        new Post(
-            uriTemplate: '/support/tickets',
-            controller: SupportController::class . '::createTicket',
-            name: 'api_support_create_ticket',
-            // Correction : aucune sécurité n'était définie — n'importe quel
-            // visiteur pouvait créer un ticket au nom d'un autre utilisateur
-            // si le contrôleur ne vérifie pas explicitement l'identité.
-            security: "is_granted('ROLE_USER')"
-        ),
-        new GetCollection(
-            uriTemplate: '/support/my-tickets',
-            controller: SupportController::class . '::getMyTickets',
-            name: 'api_support_my_tickets',
-            // Correction : sans cette contrainte, un utilisateur non
-            // authentifié pouvait potentiellement appeler cette route.
-            // ATTENTION : le contrôleur SupportController (non fourni) doit
-            // impérativement filtrer les résultats sur l'utilisateur courant
-            // ($this->getUser()) — cette annotation seule ne suffit pas à
-            // empêcher un utilisateur connecté de voir les tickets des autres
-            // si le contrôleur ne fait pas ce filtrage lui-même.
-            security: "is_granted('ROLE_USER')"
-        )
-    ]
-)]
+
 class SupportResponse
 {
     #[ORM\Id]
@@ -51,10 +24,14 @@ class SupportResponse
     #[ORM\JoinColumn(name: 'agent_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
     private ?Agent $agent = null;
 
+    #[ORM\ManyToOne(targetEntity: User::class)]
+    #[ORM\JoinColumn(name: 'author_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
+    private ?User $author = null;
+
     #[ORM\Column(type: 'text')]
     private ?string $message = null;
 
-    #[ORM\Column(name: 'created_at')]
+    #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE)]
     private ?\DateTimeInterface $createdAt = null;
 
     public function __construct()
@@ -86,6 +63,17 @@ class SupportResponse
     public function setAgent(?Agent $agent): static
     {
         $this->agent = $agent;
+        return $this;
+    }
+
+    public function getAuthor(): ?User
+    {
+        return $this->author;
+    }
+
+    public function setAuthor(?User $author): static
+    {
+        $this->author = $author;
         return $this;
     }
 
