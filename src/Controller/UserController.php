@@ -349,6 +349,14 @@ class UserController extends AbstractController
                 'status' => $agent->getStatus(),
                 'agency' => $agent->getAgency() ? ['id' => $agent->getAgency()->getId(), 'name' => $agent->getAgency()->getName()] : null,
             ];
+
+            // 👈 Notifier les admins du nouvel agent créé
+            $this->adminNotificationService->notifyEvent(
+                'Nouvel agent staff créé',
+                sprintf('L\'agence "%s" a créé un nouvel agent: "%s" (rôle: %s).', $agency->getName(), $fullName, $agent->getAgentRole()),
+                'STAFF_CREATED',
+                ['agentId' => $agent->getId(), 'agencyId' => $agency->getId(), 'agencyName' => $agency->getName()]
+            );
         }
 
         return $this->json($res, Response::HTTP_CREATED);
@@ -381,10 +389,42 @@ class UserController extends AbstractController
 
     private function serializeAgency(Agency $agency): array
     {
+        // Add KYC status
+        $documents = $agency->getDocuments();
+        $kycStatus = 'missing';
+        if ($documents->count() > 0) {
+            $hasApproved = false;
+            $hasPending = false;
+            $hasRejected = false;
+
+            foreach ($documents as $doc) {
+                switch ($doc->getStatus()) {
+                    case 'approved':
+                        $hasApproved = true;
+                        break;
+                    case 'pending':
+                        $hasPending = true;
+                        break;
+                    case 'rejected':
+                        $hasRejected = true;
+                        break;
+                }
+            }
+
+            if ($hasRejected) {
+                $kycStatus = 'rejete';
+            } elseif ($hasPending && !$hasApproved) {
+                $kycStatus = 'en_attente';
+            } elseif ($hasApproved) {
+                $kycStatus = 'verifie';
+            }
+        }
+
         return [
             'id' => $agency->getId(),
             'name' => $agency->getName(),
             'registrationNumber' => $agency->getRegistrationNumber(),
+            'legalRepresentative' => $agency->getLegalRepresentative(),
             'address' => $agency->getAddress(),
             'bannerUrl' => $agency->getBannerUrl(),
             'logoUrl' => $agency->getLogoUrl(),
@@ -393,9 +433,14 @@ class UserController extends AbstractController
             'description' => $agency->getDescription(),
             'phone' => $agency->getPhone(),
             'email' => $agency->getEmail(),
+            'city' => $agency->getCity(),
             'status' => $agency->getStatus(),
+            'kycStatut' => $kycStatus,
             'ratingCache' => $agency->getRatingCache(),
             'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'payoutMsisdn' => $agency->getPayoutMsisdn(),
+            'pendingPayoutMsisdn' => $agency->getPendingPayoutMsisdn(),
+            'pendingPayoutMsisdnRequestedAt' => $agency->getPendingPayoutMsisdnRequestedAt()?->format(\DateTimeInterface::ATOM),
             'documents' => array_map(fn($doc) => [
                 'id' => $doc->getId(),
                 'name' => $doc->getName(),

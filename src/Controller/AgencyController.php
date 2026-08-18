@@ -126,10 +126,62 @@ class AgencyController extends AbstractController
             $agency->setStatus($data['status'] !== null ? (string)$data['status'] : $agency->getStatus());
         }
 
+        if (array_key_exists('legalRepresentative', $data)) {
+            $agency->setLegalRepresentative($data['legalRepresentative'] !== null ? (string)$data['legalRepresentative'] : $agency->getLegalRepresentative());
+        }
+
+        if (array_key_exists('city', $data)) {
+            $agency->setCity($data['city'] !== null ? (string)$data['city'] : $agency->getCity());
+        }
+
         $em->persist($agency);
         $em->flush();
 
         return $this->json($this->normalizeAgency($agency));
+    }
+
+    #[Route('/{agencyId}/payout-msisdn', name: 'api_agency_propose_payout_msisdn', methods: ['POST'])]
+    public function proposePayoutMsisdn(
+        int $agencyId,
+        Request $request,
+        AgencyRepository $agencyRepository,
+        AgentRepository $agentRepository,
+        EntityManagerInterface $em
+    ): JsonResponse {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $agencyRepository->find($agencyId);
+        if (!$agency) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $agent = $agentRepository->findOneBy(['user' => $user, 'agency' => $agency]);
+        if (!$agent || $agent->getAgentRole() !== 'admin_agence') {
+            return $this->json(['message' => 'Accès refusé. Vous devez être administrateur de cette agence.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+        $msisdn = trim((string) ($data['payoutMsisdn'] ?? ''));
+        // Format Congo Brazzaville : 9 chiffres, avec ou sans indicatif +242
+        if (!preg_match('/^(\+?242)?0?\d{9}$/', $msisdn)) {
+            return $this->json(['message' => 'Numéro mobile money invalide.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        // Ne touche JAMAIS payoutMsisdn directement : seule la validation
+        // admin (AdminAgencyController::approvePayoutMsisdn) l'active.
+        $agency->setPendingPayoutMsisdn($msisdn);
+        $agency->setPendingPayoutMsisdnRequestedAt(new \DateTime());
+
+        $em->persist($agency);
+        $em->flush();
+
+        return $this->json([
+            'message' => 'Numéro proposé, en attente de validation par un administrateur.',
+            'pendingPayoutMsisdn' => $agency->getPendingPayoutMsisdn(),
+        ]);
     }
 
     #[Route('/{agencyId}/upload-images', name: 'api_agency_upload_images', methods: ['POST'])]
@@ -241,6 +293,9 @@ class AgencyController extends AbstractController
             'status' => $agency->getStatus(),
             'ratingCache' => $agency->getRatingCache(),
             'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'payoutMsisdn' => $agency->getPayoutMsisdn(),
+            'pendingPayoutMsisdn' => $agency->getPendingPayoutMsisdn(),
+            'pendingPayoutMsisdnRequestedAt' => $agency->getPendingPayoutMsisdnRequestedAt()?->format(\DateTimeInterface::ATOM),
         ];
     }
 }

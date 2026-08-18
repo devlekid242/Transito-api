@@ -60,7 +60,7 @@ class PaymentIntent
     public function __construct()
     {
         $this->createdAt = new \DateTimeImmutable();
-        $this->reference = uniqid('pi_', true);
+        $this->reference = \App\Service\MobileMoney\Uuid4Generator::generate();
     }
 
     public function getId(): ?int { return $this->id; }

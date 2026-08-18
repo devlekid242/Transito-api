@@ -460,7 +460,8 @@ class AuthController extends AbstractController
         UserPasswordHasherInterface $passwordHasher,
         EntityManagerInterface $em,
         JWTTokenManagerInterface $jwtManager,
-        RefreshTokenService $refreshTokenService
+        RefreshTokenService $refreshTokenService,
+        AdminNotificationService $adminNotificationService
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
         if (!is_array($payload)) {
@@ -518,6 +519,13 @@ class AuthController extends AbstractController
             'roles' => $user->getRoles(),
         ];
 
+        // 👈 Notifier les admins du nouvel utilisateur enregistré
+        $adminNotificationService->notifyEvent(
+            'Nouvel utilisateur enregistré',
+            sprintf('Un nouvel utilisateur "%s" (téléphone: %s) s\'est enregistré.', $user->getFullName(), $user->getPhoneNumber()),
+            'USER_REGISTERED',
+            ['userId' => $user->getId(), 'userName' => $user->getFullName(), 'phoneNumber' => $user->getPhoneNumber()]
+        );
 
         return $this->json(
             [

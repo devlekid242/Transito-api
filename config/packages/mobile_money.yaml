@@ -1,0 +1,68 @@
+parameters:
+    momo.base_url: '%env(MOMO_BASE_URL)%'
+    momo.target_environment: '%env(MOMO_TARGET_ENVIRONMENT)%'
+    momo.currency: '%env(MOMO_CURRENCY)%'
+    momo.collection.subscription_key: '%env(MOMO_COLLECTION_SUBSCRIPTION_KEY)%'
+    momo.collection.api_user: '%env(MOMO_COLLECTION_API_USER)%'
+    momo.collection.api_key: '%env(MOMO_COLLECTION_API_KEY)%'
+    momo.disbursement.subscription_key: '%env(MOMO_DISBURSEMENT_SUBSCRIPTION_KEY)%'
+    momo.disbursement.api_user: '%env(MOMO_DISBURSEMENT_API_USER)%'
+    momo.disbursement.api_key: '%env(MOMO_DISBURSEMENT_API_KEY)%'
+    momo.callback_host: '%env(MOMO_CALLBACK_HOST)%'
+
+    airtel.base_url: '%env(AIRTEL_BASE_URL)%'
+    airtel.client_id: '%env(AIRTEL_CLIENT_ID)%'
+    airtel.client_secret: '%env(AIRTEL_CLIENT_SECRET)%'
+    airtel.country: '%env(AIRTEL_COUNTRY)%'
+    airtel.currency: '%env(AIRTEL_CURRENCY)%'
+    airtel.disbursement_pin: '%env(default::AIRTEL_DISBURSEMENT_PIN)%'
+    airtel.disbursement_public_key: '%env(default::AIRTEL_DISBURSEMENT_PUBLIC_KEY)%'
+
+    transito.payment_webhook_secret: '%env(TRANSITO_PAYMENT_WEBHOOK_SECRET)%'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # --- Cache dédié aux tokens OAuth des opérateurs (courte durée de vie, ne PAS partager avec le cache applicatif général) ---
+    mobile_money.token_cache:
+        class: Symfony\Component\Cache\Adapter\FilesystemAdapter
+        arguments: ['mobile_money_tokens', 0, '%kernel.cache_dir%/mobile_money']
+
+    App\Service\MobileMoney\MtnMomoGateway:
+        arguments:
+            $httpClient: '@Symfony\Contracts\HttpClient\HttpClientInterface'
+            $cache: '@mobile_money.token_cache'
+            $baseUrl: '%momo.base_url%'
+            $targetEnvironment: '%momo.target_environment%'
+            $collectionSubscriptionKey: '%momo.collection.subscription_key%'
+            $collectionApiUser: '%momo.collection.api_user%'
+            $collectionApiKey: '%momo.collection.api_key%'
+            $disbursementSubscriptionKey: '%momo.disbursement.subscription_key%'
+            $disbursementApiUser: '%momo.disbursement.api_user%'
+            $disbursementApiKey: '%momo.disbursement.api_key%'
+            $currency: '%momo.currency%'
+            $callbackHost: '%momo.callback_host%'
+        tags: ['app.mobile_money_gateway']
+
+    App\Service\MobileMoney\AirtelMoneyGateway:
+        arguments:
+            $httpClient: '@Symfony\Contracts\HttpClient\HttpClientInterface'
+            $cache: '@mobile_money.token_cache'
+            $baseUrl: '%airtel.base_url%'
+            $clientId: '%airtel.client_id%'
+            $clientSecret: '%airtel.client_secret%'
+            $country: '%airtel.country%'
+            $currency: '%airtel.currency%'
+            $disbursementPin: '%airtel.disbursement_pin%'
+            $disbursementPublicKeyPem: '%airtel.disbursement_public_key%'
+        tags: ['app.mobile_money_gateway']
+
+    App\Service\MobileMoney\MobileMoneyGatewayFactory:
+        arguments:
+            $gateways: !tagged_iterator app.mobile_money_gateway
+
+    App\Command\PollMobileMoneyPaymentsCommand:
+        arguments:
+            $webhookSecret: '%transito.payment_webhook_secret%'

@@ -7,6 +7,7 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 use App\Entity\Admin;
 use App\Entity\User;
+use App\Service\AdminNotificationService;
 use App\Repository\AdminRepository;
 use App\Repository\UserRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -26,6 +27,7 @@ class AdminAdminController extends AbstractController
         private UserRepository $userRepository,
         private AdminRepository $adminRepository,
         private UserPasswordHasherInterface $passwordHasher,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     #[Route('', name: 'api_admin_admins_list', methods: ['GET'])]
@@ -75,7 +77,7 @@ class AdminAdminController extends AbstractController
     }
 
     #[Route('/kpis', name: 'api_admin_admins_kpis', methods: ['GET'])]
-    public function getAdminKpis(): JsonResponse 
+    public function getAdminKpis(): JsonResponse
     {
         // count SuperAdmin user
         $superAdmin = $this->adminRepository->count(['adminRole' => 'SUPER_ADMIN']);
@@ -95,7 +97,6 @@ class AdminAdminController extends AbstractController
                 'total' => $totalAdmins,
             ],
         ]);
-
     }
 
     #[Route('', name: 'api_admin_admins_create', methods: ['POST'])]
@@ -156,7 +157,7 @@ class AdminAdminController extends AbstractController
         $user->setPhoneNumber($phoneNumber);
         $user->setVilleResidence('N/A');
         $user->setQuartier('N/A');
-        $user->setRoles(['ROLE_USER']);
+        $user->setRoles(['ROLE_USER', 'ROLE_ADMIN']);
         $user->setStatus('active');
         $hashedPassword = $this->passwordHasher->hashPassword($user, $password);
         $user->setPassword($hashedPassword);
@@ -171,6 +172,19 @@ class AdminAdminController extends AbstractController
 
         $this->em->persist($admin);
         $this->em->flush();
+
+        // 👈 Notifier les admins existants de la création d'un nouvel administrateur
+        $this->adminNotificationService->notifyEvent(
+            'Nouvel administrateur créé',
+            sprintf(
+                'Un nouvel administrateur "%s" (rôle: %s, email: %s) a été créé.',
+                $fullName,
+                $adminRole,
+                $email
+            ),
+            'ADMIN_CREATED',
+            ['adminId' => $admin->getId(), 'adminEmail' => $email, 'adminRole' => $adminRole]
+        );
 
         return $this->json([
             'success' => true,

@@ -83,6 +83,39 @@ final class ExpirePendingReservationsCommand extends Command
                 $reservation->setPaymentExpiresAt(null);
                 $this->em->persist($reservation);
 
+                /**
+                 * Synchroniser également le PaymentLog.
+                 *
+                 * Une réservation peut être "echoue" alors que son PaymentLog
+                 * est encore PENDING. Dans ce cas, la tentative de paiement est
+                 * définitivement considérée comme échouée puisque le délai de
+                 * paiement de la réservation est dépassé.
+                 */
+                $paymentLog = $this->em->getRepository(\App\Entity\PaymentLog::class)->findOneBy([
+                    'reservation' => $reservation,
+                    'status' => 'PENDING',
+                ]);
+
+                if ($paymentLog) {
+                    $paymentLog->setStatus('FAILED');
+                    $paymentLog->setProcessedAt(new \DateTime());
+
+                    $rawResponse = json_decode($paymentLog->getRawResponse() ?? '{}', true);
+
+                    if (!is_array($rawResponse)) {
+                        $rawResponse = [];
+                    }
+
+                    $rawResponse['failure'] = [
+                        'reason' => 'reservation_payment_expired',
+                        'processed_at' => (new \DateTime())->format('c'),
+                    ];
+
+                    $paymentLog->setRawResponse(json_encode($rawResponse));
+
+                    $this->em->persist($paymentLog);
+                }
+
                 $notification = null;
                 if ($reservation->getUser()) {
                     $notification = new Notification();

@@ -135,6 +135,31 @@ class Agency
     #[Groups(['agency:read', 'agency:write'])]
     private string $commissionRate = '10.00';
 
+
+    #[ORM\Column(name: 'payout_msisdn', length: 20, nullable: true)]
+    #[Groups(['agency:read', 'agency:write'])]  // à adapter aux groupes réels de votre entité
+    private ?string $payoutMsisdn = null;
+
+    // Numéro mobile money réellement utilisé par PayoutService pour les
+    // retraits de cette agence. PAS de #[Groups] volontairement :
+    //  - agency:read est normalisé par GetCollection()/Get(), qui sont PUBLICS
+    //    (voir commentaire "infinite scroll app mobile") -> l'exposer
+    //    publiquement en ferait une cible de fraude.
+    //  - agency:write est désérialisé par POST /agencies/register, qui est
+    //    PUBLIC_ACCESS -> l'exposer en write permettrait à n'importe qui de
+    //    fixer son propre numéro de versement à l'inscription.
+    // Modifiable UNIQUEMENT par AdminAgencyController::approvePayoutMsisdn().
+    // #[ORM\Column(name: 'payout_msisdn', length: 20, nullable: true)]
+    // private ?string $payoutMsisdn = null;
+
+    // Numéro proposé par l'agence (agent admin_agence), en attente de
+    // validation admin. Même raisonnement de sécurité : pas de groupe.
+    #[ORM\Column(name: 'pending_payout_msisdn', length: 20, nullable: true)]
+    private ?string $pendingPayoutMsisdn = null;
+
+    #[ORM\Column(name: 'pending_payout_msisdn_requested_at', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $pendingPayoutMsisdnRequestedAt = null;
+
     #[ORM\OneToOne(mappedBy: 'agency', targetEntity: Wallet::class, cascade: ['persist'])]
     #[Groups(['agency:read'])]
     private ?Wallet $wallet = null;
@@ -410,5 +435,43 @@ class Agency
         }
 
         return $this;
+    }
+
+    public function getPayoutMsisdn(): ?string
+    {
+        return $this->payoutMsisdn;
+    }
+
+    public function setPayoutMsisdn(?string $payoutMsisdn): static
+    {
+        $this->payoutMsisdn = $payoutMsisdn;
+        return $this;
+    }
+
+    public function getPendingPayoutMsisdn(): ?string
+    {
+        return $this->pendingPayoutMsisdn;
+    }
+
+    public function setPendingPayoutMsisdn(?string $pendingPayoutMsisdn): static
+    {
+        $this->pendingPayoutMsisdn = $pendingPayoutMsisdn;
+        return $this;
+    }
+
+    public function getPendingPayoutMsisdnRequestedAt(): ?\DateTimeInterface
+    {
+        return $this->pendingPayoutMsisdnRequestedAt;
+    }
+
+    public function setPendingPayoutMsisdnRequestedAt(?\DateTimeInterface $requestedAt): static
+    {
+        $this->pendingPayoutMsisdnRequestedAt = $requestedAt;
+        return $this;
+    }
+
+    public function hasPendingPayoutMsisdn(): bool
+    {
+        return $this->pendingPayoutMsisdn !== null;
     }
 }

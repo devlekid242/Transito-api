@@ -15,6 +15,7 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
+use Doctrine\DBAL\LockMode;
 
 class TicketController extends AbstractController
 {
@@ -83,7 +84,7 @@ class TicketController extends AbstractController
                 ->andWhere('t.id = :id')
                 ->setParameter('id', $ticket->getId())
                 ->getQuery()
-                ->setLockMode(\Doctrine\ORM\LockMode::PESSIMISTIC_WRITE)
+                ->setLockMode(LockMode::PESSIMISTIC_WRITE)
                 ->getSingleResult();
         } catch (\Throwable $e) {
             if ($this->em->getConnection()->isTransactionActive()) {
@@ -179,7 +180,7 @@ class TicketController extends AbstractController
             ->andWhere('t.id = :id')
             ->setParameter('id', $id)
             ->getQuery()
-            ->setLockMode(\Doctrine\ORM\LockMode::PESSIMISTIC_WRITE)
+            ->setLockMode(LockMode::PESSIMISTIC_WRITE)
             ->getOneOrNullResult();
         if (!$ticket) {
             $this->em->rollback();
@@ -560,6 +561,11 @@ class TicketController extends AbstractController
             'departureDate' => $departureTime ? $departureTime->format('Y-m-d') : null,
             'seatNumber' => (string)$ticket->getSeatNumber(),
             'busLicensePlate' => $trip?->getBus()?->getRegistrationNumber() ?? '',
+            // Renseignés par le passager à la réservation (Reservation::boardingPoint /
+            // deboardingPoint) : affichés sur le billet et utiles à l'agent lors de
+            // l'embarquement pour savoir où le passager doit être pris en charge.
+            'boardingPoint' => $reservation?->getBoardingPoint(),
+            'deboardingPoint' => $reservation?->getDeboardingPoint(),
             // Un billet annulé ne doit plus jamais exposer de QR code exploitable.
             'qrCode' => $isCancelled ? null : $ticket->getQrCodeToken(),
             'price' => $price,

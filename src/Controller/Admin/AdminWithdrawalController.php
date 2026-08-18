@@ -22,6 +22,7 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
+use App\Service\PayoutService;
 
 /**
  * Traitement des demandes de retrait par le back-office SuperAdmin.
@@ -46,6 +47,7 @@ class AdminWithdrawalController extends AbstractController
         private \App\Service\AdminNotificationService $adminNotificationService,
         private DomainStateTransitionService $stateTransitions,
         private AuditLogger $auditLogger,
+        private PayoutService $payoutService,
     ) {}
 
     /**
@@ -109,7 +111,7 @@ class AdminWithdrawalController extends AbstractController
         foreach ($withdrawals as $withdrawal) { // ✅ $withdrawal est directement l'entité
             $agency = $withdrawal->getAgency();
             $user = $withdrawal->getRequestedBy();
-            
+
 
             $data[] = [
                 'id' => $withdrawal->getId(),
@@ -189,7 +191,7 @@ class AdminWithdrawalController extends AbstractController
      * @param Request $request Contient {note?: string, forcePay?: boolean}
      */
     #[Route('/{id}/approve', name: 'api_admin_withdrawals_approve', methods: ['POST'])]
-    public function approve(int $id, Request $request): JsonResponse
+    public function approve(int $id, Request $request, Agency $agency): JsonResponse
     {
         $withdrawal = $this->em->getRepository(WithdrawalRequest::class)->find($id);
         if (!$withdrawal) {
@@ -225,6 +227,20 @@ class AdminWithdrawalController extends AbstractController
 
             $this->em->flush();
             $connection->commit();
+
+            // 👈 NOUVEAU : le retrait a un `method` libre ('MTN_MOMO', 'AIRTEL_MONEY',
+            // virement bancaire...). N'appelez le disbursement mobile money QUE si la
+            // méthode correspond à un opérateur mobile money — sinon le virement reste
+            // géré manuellement comme aujourd'hui.
+            if (!$withdrawal->isForcePaid() && in_array($withdrawal->getMethod(), ['MTN_MOMO', 'AIRTEL_MONEY'], true)) {
+                // NB: il vous faut un numéro de téléphone bénéficiaire pour l'agence.
+                // S'il n'existe pas encore sur Agency, ajoutez un champ dédié
+                // (ex: Agency::payoutMsisdn) plutôt que de réutiliser un numéro d'agent.
+                $agencyPhone = $withdrawal->getAgency()?->getPayoutMsisdn(); // à ajouter si absent
+                if ($agencyPhone) {
+                    $this->payoutService->payoutForWithdrawal($withdrawal, $withdrawal->getMethod(), $agencyPhone, $withdrawal->getAmount());
+                }
+            }
 
             $this->adminNotificationService->notifyEvent(
                 'Retrait traité',
@@ -268,10 +284,10 @@ class AdminWithdrawalController extends AbstractController
             if ($this->walletService instanceof \App\Service\WalletService && method_exists($this->walletService, 'setRefundRequestRepository')) {
                 $this->walletService->setRefundRequestRepository($this->refundRequestRepository);
             }
-            
+
             try {
                 $solvencyResult = $this->walletService->checkWithdrawalSolvency($withdrawal);
-                
+
                 if (!$solvencyResult['solvent']) {
                     return new JsonResponse([
                         'success' => false,
@@ -310,13 +326,16 @@ class AdminWithdrawalController extends AbstractController
         $this->stateTransitions->transitionWithdrawal($withdrawal, 'approved');
         $withdrawal->setProcessedAt(new \DateTime());
         $withdrawal->setProcessedByAdmin($currentAdmin);
-        
+
         if (!empty($adminNote)) {
             $withdrawal->setAdminNote($adminNote);
         }
 
         $this->em->persist($withdrawal);
-        $this->auditLogger->record('WITHDRAWAL_APPROVED', 'WithdrawalRequest', (string) $withdrawal->getId(),
+        $this->auditLogger->record(
+            'WITHDRAWAL_APPROVED',
+            'WithdrawalRequest',
+            (string) $withdrawal->getId(),
             ['status' => 'pending'],
             ['status' => $withdrawal->getStatus()],
             ['source' => 'admin.withdrawal.approve', 'amount' => $withdrawal->getAmount(), 'agencyId' => $agency->getId(), 'forcePay' => $forcePay]
@@ -384,7 +403,10 @@ class AdminWithdrawalController extends AbstractController
             $withdrawal->setAdminNote($data['note'] ?? 'Rejeté par l\'administrateur.');
 
             $this->em->persist($withdrawal);
-            $this->auditLogger->record('WITHDRAWAL_REJECTED', 'WithdrawalRequest', (string) $withdrawal->getId(),
+            $this->auditLogger->record(
+                'WITHDRAWAL_REJECTED',
+                'WithdrawalRequest',
+                (string) $withdrawal->getId(),
                 ['status' => 'pending'],
                 ['status' => $withdrawal->getStatus()],
                 ['source' => 'admin.withdrawal.reject', 'amount' => $withdrawal->getAmount(), 'agencyId' => $withdrawal->getAgency()?->getId(), 'note' => $withdrawal->getAdminNote()]
@@ -443,7 +465,7 @@ class AdminWithdrawalController extends AbstractController
                 'message' => 'Erreur lors de la vérification de solvabilité: ' . $e->getMessage(),
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
-        
+
         return new JsonResponse([
             'success' => true,
             'withdrawalId' => $withdrawal->getId(),

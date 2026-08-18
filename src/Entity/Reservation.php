@@ -35,7 +35,7 @@ use Symfony\Component\Validator\Constraints as Assert;
             name: 'api_booking_detail'
         ),
         new Post(
-            uriTemplate: '/bookings/create',
+            uriTemplate: '/bookings',
             controller: BookingController::class . '::create',
             name: 'api_bookings_create'
         ),
@@ -90,6 +90,21 @@ class Reservation
     #[Groups(['reservation:read', 'reservation:write'])]
     private ?string $transactionReference = null;
 
+    // Point d'embarquement choisi par le client lors de la réservation (ex :
+    // "Talangaï - Gare Centrale"). Simple libellé texte : le front propose la
+    // liste des points de l'agence (AgencyPoint) mais n'envoie que le nom
+    // choisi, pas de relation stricte vers AgencyPoint. Doit être imprimé sur
+    // le billet, l'agence/le chauffeur s'en sert pour savoir où récupérer le
+    // passager.
+    #[ORM\Column(name: 'boarding_point', length: 255, nullable: true)]
+    #[Groups(['reservation:read', 'reservation:write'])]
+    private ?string $boardingPoint = null;
+
+    // Point de débarquement choisi par le client. Même logique que boardingPoint.
+    #[ORM\Column(name: 'deboarding_point', length: 255, nullable: true)]
+    #[Groups(['reservation:read', 'reservation:write'])]
+    private ?string $deboardingPoint = null;
+
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE, options: ['default' => 'CURRENT_TIMESTAMP'])]
     #[Groups(['reservation:read'])]
     private ?\DateTimeInterface $createdAt = null;
@@ -101,7 +116,7 @@ class Reservation
     #[ORM\Column(name: 'reschedule_count', type: 'integer', options: ['default' => 0])]
     private int $rescheduleCount = 0;
 
-    #[ORM\Column(name: 'last_rescheduled_at', nullable: true)]
+    #[ORM\Column(name: 'last_rescheduled_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $lastRescheduledAt = null;
 
     #[ORM\OneToMany(targetEntity: \App\Entity\Ticket::class, mappedBy: 'reservation', cascade: ['persist', 'remove'], orphanRemoval: true)]
@@ -192,6 +207,28 @@ class Reservation
     public function setTransactionReference(?string $transactionReference): static
     {
         $this->transactionReference = $transactionReference;
+        return $this;
+    }
+
+    public function getBoardingPoint(): ?string
+    {
+        return $this->boardingPoint;
+    }
+
+    public function setBoardingPoint(?string $boardingPoint): static
+    {
+        $this->boardingPoint = $boardingPoint;
+        return $this;
+    }
+
+    public function getDeboardingPoint(): ?string
+    {
+        return $this->deboardingPoint;
+    }
+
+    public function setDeboardingPoint(?string $deboardingPoint): static
+    {
+        $this->deboardingPoint = $deboardingPoint;
         return $this;
     }
 

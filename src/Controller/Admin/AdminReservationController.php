@@ -18,6 +18,7 @@ use App\Repository\TicketRepository;
 use App\Repository\TripRepository;
 use App\Repository\UserRepository;
 use App\Service\DomainStateTransitionService;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -44,6 +45,7 @@ class AdminReservationController extends AbstractController
         private TripRepository $tripRepository,
         private TicketRepository $ticketRepository,
         private DomainStateTransitionService $stateTransitions,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     /**
@@ -322,6 +324,20 @@ class AdminReservationController extends AbstractController
 
         $this->em->flush();
 
+        // 👈 Notifier les admins de la création d'une réservation par un admin
+        $this->adminNotificationService->notifyEvent(
+            'Réservation créée manuellement par un admin',
+            sprintf(
+                'Une réservation a été créée manuellement par un administrateur pour %s. Montant: %s FCFA. Trajet: %s → %s',
+                $user->getFullName(),
+                number_format((float)$reservation->getTotalAmount(), 2, ',', ' '),
+                $trip->getDepartureCity() ?? 'N/A',
+                $trip->getArrivalCity() ?? 'N/A'
+            ),
+            'RESERVATION_CREATED',
+            ['reservationId' => $reservation->getId(), 'userId' => $user->getId(), 'tripId' => $trip->getId()]
+        );
+
         return $this->json([
             'success' => true,
             'message' => 'Réservation créée avec succès',
@@ -368,6 +384,18 @@ class AdminReservationController extends AbstractController
 
         $this->em->flush();
 
+        // 👈 Notifier les admins de la modification d'une réservation
+        $this->adminNotificationService->notifyEvent(
+            'Réservation mise à jour',
+            sprintf(
+                'La réservation #%d a été mise à jour. Nouveau statut: %s.',
+                $reservation->getId(),
+                $data['paymentStatus'] ?? $reservation->getPaymentStatus() ?? 'N/A'
+            ),
+            'RESERVATION_UPDATED',
+            ['reservationId' => $reservation->getId(), 'paymentStatus' => $reservation->getPaymentStatus()]
+        );
+
         return $this->json([
             'success' => true,
             'message' => 'Réservation mise à jour avec succès',
@@ -395,44 +423,44 @@ class AdminReservationController extends AbstractController
                 ], Response::HTTP_NOT_FOUND);
             }
 
-        $data = json_decode($request->getContent(), true);
-        $reason = $data['reason'] ?? 'Annulation administrative';
-        $refund = $data['refund'] ?? false;
+            $data = json_decode($request->getContent(), true);
+            $reason = $data['reason'] ?? 'Annulation administrative';
+            $refund = $data['refund'] ?? false;
 
-        // Check if cancellation is allowed
-        if (!$this->canCancel($reservation)) {
+            // Check if cancellation is allowed
+            if (!$this->canCancel($reservation)) {
+                return $this->json([
+                    'success' => false,
+                    'message' => 'Impossible d\'annuler cette réservation (déjà terminée ou annulée)',
+                ], 400);
+            }
+
+            // Store original payment status BEFORE updating it, so we can check if refund is needed
+            $wasPaid = $reservation->getPaymentStatus() === 'paye';
+
+            // Update reservation status
+            $this->stateTransitions->transitionReservationPayment($reservation, 'annule');
+
+            // Update all tickets
+            foreach ($reservation->getTickets() as $ticket) {
+                $this->stateTransitions->transitionTicket($ticket, 'annule');
+                // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
+                $ticket->setQrCodeToken(null);
+            }
+
+            // Handle refund if requested and payment was made
+            if ($refund && $wasPaid) {
+                $this->processRefund($reservation, $reason);
+            }
+
+            $this->em->flush();
+            $connection->commit();
+
             return $this->json([
-                'success' => false,
-                'message' => 'Impossible d\'annuler cette réservation (déjà terminée ou annulée)',
-            ], 400);
-        }
-
-        // Store original payment status BEFORE updating it, so we can check if refund is needed
-        $wasPaid = $reservation->getPaymentStatus() === 'paye';
-
-        // Update reservation status
-        $this->stateTransitions->transitionReservationPayment($reservation, 'annule');
-
-        // Update all tickets
-        foreach ($reservation->getTickets() as $ticket) {
-            $this->stateTransitions->transitionTicket($ticket, 'annule');
-            // 👈 SÉCURITÉ : invalider le jeton QR pour empêcher toute réutilisation malveillante
-            $ticket->setQrCodeToken(null);
-        }
-
-        // Handle refund if requested and payment was made
-        if ($refund && $wasPaid) {
-            $this->processRefund($reservation, $reason);
-        }
-
-        $this->em->flush();
-        $connection->commit();
-
-        return $this->json([
-            'success' => true,
-            'message' => 'Réservation annulée avec succès',
-            'data' => $this->normalizeReservationDetail($reservation),
-        ]);
+                'success' => true,
+                'message' => 'Réservation annulée avec succès',
+                'data' => $this->normalizeReservationDetail($reservation),
+            ]);
         } catch (\Throwable $e) {
             $connection->rollBack();
             throw $e;
@@ -594,8 +622,8 @@ class AdminReservationController extends AbstractController
         if ($trip) {
             $departureCity = $trip->getDepartureCity() ?? 'N/A';
             $arrivalCity = $trip->getArrivalCity() ?? 'N/A';
-            $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A' 
-                ? $departureCity . ' → ' . $arrivalCity 
+            $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A'
+                ? $departureCity . ' → ' . $arrivalCity
                 : 'Inconnue';
         }
 
@@ -624,6 +652,10 @@ class AdminReservationController extends AbstractController
             ] : null,
             'totalAmount' => (float) ($reservation->getTotalAmount() ?? 0),
             'seats' => $reservation->getTickets()->count(),
+            // Points d'embarquement / débarquement choisis par le client à la
+            // réservation (Reservation::boardingPoint / deboardingPoint).
+            'boardingPoint' => $reservation->getBoardingPoint(),
+            'deboardingPoint' => $reservation->getDeboardingPoint(),
             'paymentMethod' => $this->formatPaymentMethod($reservation->getPaymentMethod()),
             'paymentStatus' => $this->normalizePaymentStatus($reservation->getPaymentStatus()),
             'status' => $this->normalizeReservationStatus($reservation->getPaymentStatus()),
@@ -648,10 +680,10 @@ class AdminReservationController extends AbstractController
         if ($trip) {
             $departureCity = $trip->getDepartureCity() ?? 'N/A';
             $arrivalCity = $trip->getArrivalCity() ?? 'N/A';
-            $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A' 
-                ? $departureCity . ' → ' . $arrivalCity 
+            $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A'
+                ? $departureCity . ' → ' . $arrivalCity
                 : 'Inconnue';
-            
+
             if ($trip->getDepartureTime()) {
                 $departureTime = $trip->getDepartureTime()->format('H:i');
                 $departureDate = $trip->getDepartureTime()->format('Y-m-d');
@@ -705,6 +737,10 @@ class AdminReservationController extends AbstractController
             ] : null,
             'totalAmount' => (float) ($reservation->getTotalAmount() ?? 0),
             'paymentPhone' => $reservation->getPaymentPhone(),
+            // Points d'embarquement / débarquement choisis par le client à la
+            // réservation (Reservation::boardingPoint / deboardingPoint).
+            'boardingPoint' => $reservation->getBoardingPoint(),
+            'deboardingPoint' => $reservation->getDeboardingPoint(),
             'paymentMethod' => $this->formatPaymentMethod($reservation->getPaymentMethod()),
             'paymentStatus' => $this->normalizePaymentStatus($reservation->getPaymentStatus()),
             'status' => $this->normalizeReservationStatus($reservation->getPaymentStatus()),
@@ -722,8 +758,8 @@ class AdminReservationController extends AbstractController
     {
         $departureCity = $trip->getDepartureCity() ?? 'N/A';
         $arrivalCity = $trip->getArrivalCity() ?? 'N/A';
-        $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A' 
-            ? $departureCity . ' → ' . $arrivalCity 
+        $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A'
+            ? $departureCity . ' → ' . $arrivalCity
             : 'Inconnue';
 
         $departureTime = $trip->getDepartureTime() ? $trip->getDepartureTime()->format('Y-m-d H:i') : 'N/A';
@@ -795,7 +831,7 @@ class AdminReservationController extends AbstractController
         // Update reservation payment info
         $this->stateTransitions->transitionReservationPayment($reservation, 'paye');
         $reservation->setPaymentMethod($paymentLog->getOperator());
-        
+
         if (!$reservation->getTransactionReference()) {
             $reservation->setTransactionReference($paymentLog->getReference());
         }
@@ -827,11 +863,11 @@ class AdminReservationController extends AbstractController
     private function canCancel(Reservation $reservation): bool
     {
         $status = strtolower($reservation->getPaymentStatus() ?? '');
-        
+
         // Cannot cancel if already cancelled, completed, or failed
         // Note: 'annule' and 'rembourse' are both terminal states that prevent re-cancellation
         $cannotCancelStatuses = ['annule', 'annulée', 'rembourse', 'remboursée', 'termine', 'completee', 'completée', 'echoue', 'failed'];
-        
+
         return !in_array($status, $cannotCancelStatuses, true);
     }
 
@@ -1012,8 +1048,8 @@ class AdminReservationController extends AbstractController
         $bus = $trip->getBus();
         $departureCity = $trip->getDepartureCity() ?? 'N/A';
         $arrivalCity = $trip->getArrivalCity() ?? 'N/A';
-        $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A' 
-            ? $departureCity . ' → ' . $arrivalCity 
+        $route = $departureCity !== 'N/A' && $arrivalCity !== 'N/A'
+            ? $departureCity . ' → ' . $arrivalCity
             : 'Inconnue';
 
         $departureTime = null;

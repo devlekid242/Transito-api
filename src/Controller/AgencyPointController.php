@@ -7,6 +7,7 @@ use App\Entity\Agency;
 use App\Entity\User;
 use App\Repository\AgencyPointRepository;
 use App\Repository\AgentRepository;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -21,6 +22,7 @@ class AgencyPointController extends AbstractController
         private AgencyPointRepository $repo,
         private AgentRepository $agentRepository,
         private EntityManagerInterface $em,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     #[Route('', name: 'api_agency_points_list', methods: ['GET'])]
@@ -94,7 +96,7 @@ class AgencyPointController extends AbstractController
             return $this->json(['message' => 'Agence introuvable pour l\'utilisateur connecté.'], Response::HTTP_FORBIDDEN);
         }
 
-        
+
         $data = json_decode($request->getContent(), true) ?? [];
         // return $this->Json($data, Response::HTTP_BAD_REQUEST);
 
@@ -117,6 +119,19 @@ class AgencyPointController extends AbstractController
 
         $this->em->persist($point);
         $this->em->flush();
+
+        // 👈 Notifier les admins de la création d'un nouveau point d'embarquement
+        $this->adminNotificationService->notifyEvent(
+            'Nouveau point d\'embarquement créé',
+            sprintf(
+                'Un nouveau point d\'embarquement "%s" a été créé par l\'agence "%s" dans la ville %s.',
+                $point->getName(),
+                $agency->getName(),
+                $point->getCity()
+            ),
+            'AGENCY_POINT_CREATED',
+            ['pointId' => $point->getId(), 'agencyId' => $agency->getId(), 'city' => $point->getCity()]
+        );
 
         return $this->json($this->normalizePoint($point), Response::HTTP_CREATED);
     }
@@ -181,6 +196,18 @@ class AgencyPointController extends AbstractController
         $this->em->persist($point);
         $this->em->flush();
 
+        // 👈 Notifier les admins de la modification d'un point d'embarquement
+        $this->adminNotificationService->notifyEvent(
+            'Point d\'embarquement mis à jour',
+            sprintf(
+                'Le point d\'embarquement "%s" ("%s") a été modifié.',
+                $point->getName(),
+                $point->getCity()
+            ),
+            'AGENCY_POINT_UPDATED',
+            ['pointId' => $point->getId(), 'pointName' => $point->getName()]
+        );
+
         return $this->json($this->normalizePoint($point));
     }
 
@@ -216,6 +243,18 @@ class AgencyPointController extends AbstractController
 
         $this->em->remove($point);
         $this->em->flush();
+
+        // 👈 Notifier les admins de la suppression d'un point d'embarquement
+        $this->adminNotificationService->notifyEvent(
+            'Point d\'embarquement supprimé',
+            sprintf(
+                'Le point d\'embarquement "%s" dans %s a été supprimé.',
+                $point->getName(),
+                $point->getCity()
+            ),
+            'AGENCY_POINT_DELETED',
+            ['pointId' => $point->getId(), 'pointName' => $point->getName()]
+        );
 
         return $this->json(['success' => true, 'message' => 'Point supprimé.']);
     }

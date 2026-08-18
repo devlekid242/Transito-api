@@ -10,6 +10,7 @@ use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Common\Collections\ArrayCollection;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
@@ -36,6 +37,7 @@ final class FinalizeNoShowsCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $now = new \DateTimeImmutable();
+
         $tickets = $this->em->getRepository(Ticket::class)->createQueryBuilder('t')
             ->join('t.reservation', 'r')
             ->join('r.trip', 'tr')
@@ -43,14 +45,21 @@ final class FinalizeNoShowsCommand extends Command
             ->andWhere('r.paymentStatus = :paid')
             ->andWhere('tr.departureTime <= :noShowCutoff')
             ->andWhere('tr.status != :cancelled')
-            ->setParameters([
-                'pending' => 'en_attente',
-                'paid' => 'paye',
-                'noShowCutoff' => $now->modify(sprintf('-%d minutes', max(0, $this->noShowGraceMinutes))),
-                'cancelled' => 'annule',
-            ])
+            ->setParameter('pending', 'en_attente')
+            ->setParameter('paid', 'paye')
+            ->setParameter(
+                'noShowCutoff',
+                $now->modify(
+                    sprintf(
+                        '-%d minutes',
+                        max(0, $this->noShowGraceMinutes)
+                    )
+                )
+            )
+            ->setParameter('cancelled', 'annule')
             ->orderBy('tr.departureTime', 'ASC')
-            ->getQuery()->getResult();
+            ->getQuery()
+            ->getResult();
 
         $count = 0;
         foreach ($tickets as $ticket) {

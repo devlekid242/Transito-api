@@ -39,11 +39,11 @@ class TripController extends AbstractController
 
     public function index(Request $request, AgentRepository $agentRepository): JsonResponse
     {
-        $departureCity = $request->query->get('departure_city')?? null;
-        $arrivalCity = $request->query->get('arrival_city')?? null;
-        $departureDate = $request->query->get('departure_date')?? null;
-        $category = $request->query->get('category')?? null;
-        $maxPrice = $request->query->get('max_price')?? null;
+        $departureCity = $request->query->get('departure_city') ?? null;
+        $arrivalCity = $request->query->get('arrival_city') ?? null;
+        $departureDate = $request->query->get('departure_date') ?? null;
+        $category = $request->query->get('category') ?? null;
+        $maxPrice = $request->query->get('max_price') ?? null;
         $page = max(1, (int)$request->query->get('page', 1));
         $limit = max(1, (int)$request->query->get('limit', 10));
 
@@ -66,13 +66,13 @@ class TripController extends AbstractController
         }
 
         if ($user instanceof User) {
-            if(!in_array('ROLE_PARTNER', $user->getRoles())) {
+            if (!in_array('ROLE_PARTNER', $user->getRoles())) {
                 $qb->andWhere('t.departureTime >= :now')
                     ->setParameter('now', new \DateTime());
             }
         }
 
-        
+
 
         if ($departureCity) {
             $qb->andWhere(
@@ -151,7 +151,7 @@ class TripController extends AbstractController
         if (!$trip) {
             return $this->json(['message' => 'Trajet introuvable.'], JsonResponse::HTTP_NOT_FOUND);
         }
-        
+
         return $this->json($this->normalizeTrip($trip));
     }
 
@@ -362,6 +362,23 @@ class TripController extends AbstractController
 
         try {
             $result = $this->tripCancellationService->cancel($trip, $actor, $reason);
+            // 👈 Notifier les admins de l'annulation du voyage
+            $cancelledCount = $result['cancelledReservations'] ?? 0;
+            $refundedAmount = number_format((float)($result['refundedAmount'] ?? 0), 2, ',', ' ');
+            $this->adminNotificationService->notifyEvent(
+                'Voyage annulé',
+                sprintf(
+                    'Le voyage %s → %s du %s a été annulé. Raison: %s. %d réservation(s) affectée(s). Montant en attente de remboursement: %s FCFA',
+                    $trip->getDepartureCity(),
+                    $trip->getArrivalCity(),
+                    $trip->getDepartureTime()?->format('d/m/Y H:i') ?? 'date inconnue',
+                    $reason,
+                    $cancelledCount,
+                    $refundedAmount
+                ),
+                'TRIP_CANCELLED',
+                ['tripId' => $trip->getId(), 'agencyId' => $trip->getAgency()?->getId(), 'cancelledReservationsCount' => $cancelledCount]
+            );
             return $this->json([
                 'success' => true,
                 'message' => 'Voyage annulé. Les billets concernés ont été invalidés et les demandes de remboursement ont été transmises à l’administration.',

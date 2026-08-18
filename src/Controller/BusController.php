@@ -8,6 +8,7 @@ use App\Entity\User;
 use App\Entity\Agent;
 use App\Repository\AgentRepository;
 use App\Repository\BusRepository;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -24,6 +25,7 @@ class BusController extends AbstractController
         private BusRepository $busRepository,
         private AgentRepository $agentRepository,
         private EntityManagerInterface $em,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     public function getAgencyBus(): JsonResponse
@@ -43,7 +45,7 @@ class BusController extends AbstractController
         $agency = $this->getAuthenticatedAgency();
         if (!$agency) {
             return $this->json(['message' => 'Agence introuvable pour l\'utilisateur connecté.'], Response::HTTP_FORBIDDEN);
-        } 
+        }
 
         $buses = $this->busRepository->createQueryBuilder('b')
             ->andWhere('b.status = :maintenance')
@@ -123,6 +125,19 @@ class BusController extends AbstractController
         $this->em->persist($bus);
         $this->em->flush();
 
+        // 👈 Notifier les admins de la création d'un nouveau bus
+        $this->adminNotificationService->notifyEvent(
+            'Nouveau bus créé',
+            sprintf(
+                'Un nouveau bus "%s" (%s places) a été créé par l\'agence "%s".',
+                $bus->getRegistrationNumber(),
+                $bus->getCapacity(),
+                $agency->getName()
+            ),
+            'BUS_CREATED',
+            ['busId' => $bus->getId(), 'registrationNumber' => $bus->getRegistrationNumber(), 'agencyId' => $agency->getId()]
+        );
+
         return $this->json($bus, Response::HTTP_CREATED, [], [AbstractNormalizer::GROUPS => ['bus:read']]);
     }
 
@@ -190,6 +205,18 @@ class BusController extends AbstractController
         $this->em->persist($bus);
         $this->em->flush();
 
+        // 👈 Notifier les admins de la modification d'un bus
+        $this->adminNotificationService->notifyEvent(
+            'Bus mis à jour',
+            sprintf(
+                'Le bus "%s" a été modifié. Statut actuel: %s.',
+                $bus->getRegistrationNumber(),
+                $bus->getStatus()
+            ),
+            'BUS_UPDATED',
+            ['busId' => $bus->getId(), 'registrationNumber' => $bus->getRegistrationNumber(), 'status' => $bus->getStatus()]
+        );
+
         return $this->json($bus, Response::HTTP_OK, [], [AbstractNormalizer::GROUPS => ['bus:read']]);
     }
 
@@ -229,6 +256,18 @@ class BusController extends AbstractController
 
         $this->em->remove($bus);
         $this->em->flush();
+
+        // 👈 Notifier les admins de la suppression d'un bus
+        $this->adminNotificationService->notifyEvent(
+            'Bus supprimé',
+            sprintf(
+                'Le bus "%s" (%s places) a été supprimé.',
+                $bus->getRegistrationNumber(),
+                $bus->getCapacity()
+            ),
+            'BUS_DELETED',
+            ['busId' => $bus->getId(), 'registrationNumber' => $bus->getRegistrationNumber()]
+        );
 
         return $this->json([
             'success' => true,

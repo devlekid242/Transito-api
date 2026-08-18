@@ -15,6 +15,7 @@ use App\Service\AdminNotificationService;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
 use App\Service\RescheduleService;
+use App\Service\MobileMoney\MobileMoneyGatewayFactory;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -22,6 +23,9 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
+use Doctrine\DBAL\LockMode;
+use App\Service\MobileMoney\Uuid4Generator;
+use App\Service\MobileMoney\MobileMoneyTextSanitizer;
 
 class PaymentController extends AbstractController
 {
@@ -34,6 +38,7 @@ class PaymentController extends AbstractController
         private DomainStateTransitionService $stateTransitions,
         private AuditLogger $auditLogger,
         private RescheduleService $rescheduleService,
+        private MobileMoneyGatewayFactory $mobileMoneyGatewayFactory,
     ) {}
 
 
@@ -107,8 +112,10 @@ class PaymentController extends AbstractController
             if ($idempotencyKey !== '') {
                 $existingByKey = $this->em->getRepository(PaymentLog::class)->findOneBy(['idempotencyKey' => $idempotencyKey]);
                 if ($existingByKey) {
-                    if ($existingByKey->getReservation()?->getId() !== $reservation->getId()
-                        || $existingByKey->getUser()?->getId() !== $user->getId()) {
+                    if (
+                        $existingByKey->getReservation()?->getId() !== $reservation->getId()
+                        || $existingByKey->getUser()?->getId() !== $user->getId()
+                    ) {
                         $connection->rollBack();
                         return new JsonResponse(['error' => 'Cette Idempotency-Key est déjà utilisée pour une autre opération.'], 409);
                     }
@@ -138,43 +145,69 @@ class PaymentController extends AbstractController
                 ], 200);
             }
 
-        // 👈 CORRIGÉ (audit intégrité) : le montant du PaymentLog était
-        // auparavant celui envoyé par le client (`$data['amount']`), non
-        // vérifié. Le crédit réel du portefeuille (creditForReservationPayment)
-        // se base bien sur reservation.totalAmount côté serveur, donc le
-        // grand livre lui-même n'était pas corruptible — mais le PaymentLog
-        // (utilisé pour les reçus, l'historique et la réconciliation admin)
-        // pouvait afficher un montant différent de ce qui était réellement dû.
-        // On recalcule désormais TOUJOURS depuis la réservation, seule
-        // source de vérité, comme le fait déjà BookingController::create().
-        $amount = $reservation->getTotalAmount();
+            // 👈 CORRIGÉ (audit intégrité) : le montant du PaymentLog était
+            // auparavant celui envoyé par le client (`$data['amount']`), non
+            // vérifié. Le crédit réel du portefeuille (creditForReservationPayment)
+            // se base bien sur reservation.totalAmount côté serveur, donc le
+            // grand livre lui-même n'était pas corruptible — mais le PaymentLog
+            // (utilisé pour les reçus, l'historique et la réconciliation admin)
+            // pouvait afficher un montant différent de ce qui était réellement dû.
+            // On recalcule désormais TOUJOURS depuis la réservation, seule
+            // source de vérité, comme le fait déjà BookingController::create().
+            $amount = $reservation->getTotalAmount();
 
-        $log = new PaymentLog();
-        $log->setReservation($reservation);
-        $log->setUser($user);
-        $log->setIdempotencyKey($idempotencyKey !== '' ? $idempotencyKey : null);
-        $log->setOperator($method);
-        $reference = uniqid('pay_', true);
-        $log->setReference($reference);
-        $log->setAmount((string)$amount);
-        $log->setStatus('PENDING');
-        $log->setRawResponse(null);
+            $log = new PaymentLog();
+            $log->setReservation($reservation);
+            $log->setUser($user);
+            $log->setIdempotencyKey($idempotencyKey !== '' ? $idempotencyKey : null);
+            $log->setOperator($method);
+            $reference = Uuid4Generator::generate();
+            $log->setReference($reference);
+            $log->setAmount((string)$amount);
+            $log->setStatus('PENDING');
+            $log->setRawResponse(null);
 
-        $this->em->persist($log);
-        $this->em->flush();
-        $connection->commit();
+            $this->em->persist($log);
+            $this->em->flush();
+            $connection->commit();
 
-        // NB : à ce stade, la réservation est en attente de paiement (payment_status = 'en_attente').
-        // Elle ne doit JAMAIS être comptabilisée dans le chiffre d'affaires ni dans le solde d'une
-        // agence tant que confirm() n'a pas marqué le PaymentLog en SUCCESS. C'était la source de
-        // l'incohérence signalée : des réservations non payées gonflaient les stats du partenaire.
+            // 👈 NOUVEAU : déclenche le push USSD / demande de paiement réelle.
+            // Le PaymentLog reste PENDING : seul le webhook (ou le polling en
+            // sandbox, voir PollMobileMoneyPaymentsCommand) le fera passer à
+            // SUCCESS/FAILED — comme le fait déjà remarquer le commentaire existant
+            // juste au-dessus de confirm().
+            try {
+                $gateway = $this->mobileMoneyGatewayFactory->get($method);
+                $gateway->requestToPay(
+                    referenceId: $reference,               // même valeur que PaymentLog::reference
+                    amount: (string) $amount,
+                    msisdn: $reservation->getPaymentPhone(),
+                    externalId: $reference,
+                    payerMessage: MobileMoneyTextSanitizer::sanitize(sprintf('Reservation #%d', $reservation->getId())),
+                    payeeNote: 'Transito',
+                );
+            } catch (\App\Service\MobileMoney\MobileMoneyException $e) {
+                // On ne fait PAS échouer la création du PaymentLog pour un souci
+                // réseau ponctuel : il reste PENDING et sera repris par le polling.
+                // On journalise pour investigation si ça persiste.
+                // $this->logger->error('MoMo requestToPay a échoué pour ' . $reference . ': ' . $e->getMessage(), [
+                //     'exception' => $e,
+                // ]);
+                error_log('MoMo requestToPay a échoué pour ' . $reference . ': ' . $e->getMessage());
+                return new JsonResponse(['success' => false,'message' => "un probleme un survenue lors de la creation de requestTopaie ,". $reference . ': ' . $e->getMessage()],400);
+            }
 
-        return new JsonResponse([
-            'success' => true,
-            'transactionId' => $reference,
-            'status' => $log->getStatus(),
-            'paymentLogId' => $log->getId()
-        ], 201);
+            // NB : à ce stade, la réservation est en attente de paiement (payment_status = 'en_attente').
+            // Elle ne doit JAMAIS être comptabilisée dans le chiffre d'affaires ni dans le solde d'une
+            // agence tant que confirm() n'a pas marqué le PaymentLog en SUCCESS. C'était la source de
+            // l'incohérence signalée : des réservations non payées gonflaient les stats du partenaire.
+
+            return new JsonResponse([
+                'success' => true,
+                'transactionId' => $reference,
+                'status' => $log->getStatus(),
+                'paymentLogId' => $log->getId()
+            ], 201);
         } catch (\Throwable $e) {
             if ($connection->isTransactionActive()) {
                 $connection->rollBack();
@@ -290,7 +323,10 @@ class PaymentController extends AbstractController
                 $this->em->persist($intent);
                 $this->rescheduleService->finalize($adjustment);
                 $this->em->flush();
-                $this->auditLogger->record('RESCHEDULE_PAYMENT_SUCCEEDED', 'PaymentIntent', (string) $intent->getId(),
+                $this->auditLogger->record(
+                    'RESCHEDULE_PAYMENT_SUCCEEDED',
+                    'PaymentIntent',
+                    (string) $intent->getId(),
                     ['status' => PaymentIntent::STATUS_PENDING],
                     ['status' => PaymentIntent::STATUS_SUCCESS],
                     ['reservationId' => $reservation->getId(), 'rescheduleId' => $adjustment->getId(), 'amount' => $amount]
@@ -340,7 +376,7 @@ class PaymentController extends AbstractController
                 ->where('p.id = :id')
                 ->setParameter('id', $log->getId())
                 ->getQuery()
-                ->setLockMode(\Doctrine\ORM\LockMode::PESSIMISTIC_WRITE)
+                ->setLockMode(LockMode::PESSIMISTIC_WRITE)
                 ->getSingleResult();
 
             // Verrouiller aussi la réservation : deux PaymentLog différents ne doivent
@@ -428,7 +464,10 @@ class PaymentController extends AbstractController
             $this->em->persist($notification);
 
             $this->em->flush();
-            $this->auditLogger->record('PAYMENT_SUCCEEDED', 'PaymentLog', (string) $log->getId(),
+            $this->auditLogger->record(
+                'PAYMENT_SUCCEEDED',
+                'PaymentLog',
+                (string) $log->getId(),
                 ['status' => 'PENDING', 'reservationPaymentStatus' => 'en_attente'],
                 ['status' => $log->getStatus(), 'reservationPaymentStatus' => $reservation->getPaymentStatus()],
                 ['source' => 'payment.webhook', 'reservationId' => $reservation->getId(), 'providerReference' => $providerReference, 'amount' => $amount]
@@ -491,7 +530,6 @@ class PaymentController extends AbstractController
     }
 
     public function methods(): JsonResponse
-
     {
         $methods = [
             ['id' => 'MTN_MOMO', 'name' => 'MTN Mobile Money'],
@@ -595,73 +633,73 @@ class PaymentController extends AbstractController
             $log = $this->em->getRepository(PaymentLog::class)->find($id);
             if (!$log) return new JsonResponse(['error' => 'Not found'], 404);
 
-        // 👈 NOUVEAU : ne rembourser qu'une transaction réellement payée
-        // (SUCCESS) ou explicitement en attente de remboursement
-        // (REFUND_PENDING, cas normal issu de BookingController::cancel()).
-        // Empêche de "rembourser" un log encore PENDING (jamais confirmé) ou
-        // déjà REFUNDED/FAILED.
-        $refundableStatuses = ['SUCCESS', 'REFUND_PENDING'];
-        if (!in_array($log->getStatus(), $refundableStatuses, true)) {
-            return new JsonResponse([
-                'error' => sprintf('Cette transaction (statut: %s) ne peut pas être remboursée.', $log->getStatus()),
-            ], 409);
-        }
-
-        $data = json_decode($request->getContent(), true) ?? [];
-        $reason = $data['reason'] ?? 'requested_by_user';
-
-        $log->setStatus('REFUNDED');
-        $log->setProcessedAt(new \DateTime());
-        $raw = json_decode($log->getRawResponse() ?? '{}', true);
-        $raw['refund'] = ['reason' => $reason, 'at' => (new \DateTime())->format('c')];
-        $log->setRawResponse(json_encode($raw));
-
-        // mark reservation as refunded
-        $reservation = $log->getReservation();
-        if ($reservation) {
-            // 👈 SÉCURITÉ : ne jamais rembourser une réservation dont un billet a déjà été validé/embarqué.
-            // Un passager qui est monté dans le bus ne peut pas être remboursé.
-            $existingTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
-            $hasBoardedTicket = false;
-            foreach ($existingTickets as $ticket) {
-                if ($ticket->getStatus() === 'embarque') {
-                    $hasBoardedTicket = true;
-                    break;
-                }
-            }
-            if ($hasBoardedTicket) {
+            // 👈 NOUVEAU : ne rembourser qu'une transaction réellement payée
+            // (SUCCESS) ou explicitement en attente de remboursement
+            // (REFUND_PENDING, cas normal issu de BookingController::cancel()).
+            // Empêche de "rembourser" un log encore PENDING (jamais confirmé) ou
+            // déjà REFUNDED/FAILED.
+            $refundableStatuses = ['SUCCESS', 'REFUND_PENDING'];
+            if (!in_array($log->getStatus(), $refundableStatuses, true)) {
                 return new JsonResponse([
-                    'error' => "Impossible de rembourser : au moins un billet de cette réservation a déjà été validé à l'embarquement.",
+                    'error' => sprintf('Cette transaction (statut: %s) ne peut pas être remboursée.', $log->getStatus()),
                 ], 409);
             }
 
-            $this->stateTransitions->transitionReservationPayment($reservation, 'rembourse');
-            $this->em->persist($reservation);
+            $data = json_decode($request->getContent(), true) ?? [];
+            $reason = $data['reason'] ?? 'requested_by_user';
 
-            // Si l'agence avait déjà été créditée pour cette réservation, on retire
-            // le montant net de son portefeuille (voir WalletService::debitForRefund).
-            $this->walletService->debitForRefund($reservation, $reason);
-        }
+            $log->setStatus('REFUNDED');
+            $log->setProcessedAt(new \DateTime());
+            $raw = json_decode($log->getRawResponse() ?? '{}', true);
+            $raw['refund'] = ['reason' => $reason, 'at' => (new \DateTime())->format('c')];
+            $log->setRawResponse(json_encode($raw));
 
-        if ($reservation?->getUser()) {
-            $notification = new Notification();
-            $notification->setRecipientType('user')
-                ->setRecipientId($reservation->getUser()->getId())
-                ->setTitle('Remboursement effectué')
-                ->setContent(sprintf('Le remboursement de votre réservation #%d a été traité.', $reservation->getId()))
-                ->setCategory('PAYMENT');
-            $this->em->persist($notification);
-        }
+            // mark reservation as refunded
+            $reservation = $log->getReservation();
+            if ($reservation) {
+                // 👈 SÉCURITÉ : ne jamais rembourser une réservation dont un billet a déjà été validé/embarqué.
+                // Un passager qui est monté dans le bus ne peut pas être remboursé.
+                $existingTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+                $hasBoardedTicket = false;
+                foreach ($existingTickets as $ticket) {
+                    if ($ticket->getStatus() === 'embarque') {
+                        $hasBoardedTicket = true;
+                        break;
+                    }
+                }
+                if ($hasBoardedTicket) {
+                    return new JsonResponse([
+                        'error' => "Impossible de rembourser : au moins un billet de cette réservation a déjà été validé à l'embarquement.",
+                    ], 409);
+                }
 
-        $this->em->persist($log);
-        $this->em->flush();
-        $connection->commit();
+                $this->stateTransitions->transitionReservationPayment($reservation, 'rembourse');
+                $this->em->persist($reservation);
 
-        if (isset($notification)) {
-            $this->notificationBroadcaster->broadcast($notification);
-        }
+                // Si l'agence avait déjà été créditée pour cette réservation, on retire
+                // le montant net de son portefeuille (voir WalletService::debitForRefund).
+                $this->walletService->debitForRefund($reservation, $reason);
+            }
 
-        return new JsonResponse(['success' => true], 200);
+            if ($reservation?->getUser()) {
+                $notification = new Notification();
+                $notification->setRecipientType('user')
+                    ->setRecipientId($reservation->getUser()->getId())
+                    ->setTitle('Remboursement effectué')
+                    ->setContent(sprintf('Le remboursement de votre réservation #%d a été traité.', $reservation->getId()))
+                    ->setCategory('PAYMENT');
+                $this->em->persist($notification);
+            }
+
+            $this->em->persist($log);
+            $this->em->flush();
+            $connection->commit();
+
+            if (isset($notification)) {
+                $this->notificationBroadcaster->broadcast($notification);
+            }
+
+            return new JsonResponse(['success' => true], 200);
         } catch (\Throwable $e) {
             $connection->rollBack();
             throw $e;

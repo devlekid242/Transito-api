@@ -17,6 +17,7 @@ use App\Repository\AgentRepository;
 use App\Repository\ApplicationRepository;
 use App\Repository\UserRepository;
 use App\Service\ApplicationApprovalService;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -43,6 +44,7 @@ class AdminApplicationController extends AbstractController
         private AgentRepository $agentRepository,
         private ApplicationApprovalService $approvalService,
         private ValidatorInterface $validator,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     /**
@@ -67,12 +69,22 @@ class AdminApplicationController extends AbstractController
 
         // Get paginated results
         $applications = $this->applicationRepository->findPaginated(
-            $page, $limit, $status, $search, $city, $startDateObj, $endDateObj
+            $page,
+            $limit,
+            $status,
+            $search,
+            $city,
+            $startDateObj,
+            $endDateObj
         );
 
         // Get total count for pagination
         $total = $this->applicationRepository->countFiltered(
-            $status, $search, $city, $startDateObj, $endDateObj
+            $status,
+            $search,
+            $city,
+            $startDateObj,
+            $endDateObj
         );
         $totalPages = (int) ceil($total / $limit);
 
@@ -110,7 +122,11 @@ class AdminApplicationController extends AbstractController
 
         // Count by date range
         $inRange = $this->applicationRepository->countFiltered(
-            'ALL', null, null, $startDate, $endDate
+            'ALL',
+            null,
+            null,
+            $startDate,
+            $endDate
         );
 
         // Get recent applications
@@ -192,6 +208,19 @@ class AdminApplicationController extends AbstractController
         try {
             // Use the approval service to handle the workflow
             $result = $this->approvalService->approveApplication($application, $dto, $this->getUser());
+
+            // 👈 Notifier les admins de l'approbation de candidature
+            $this->adminNotificationService->notifyEvent(
+                'Candidature d\'agence approuvée',
+                sprintf(
+                    'La candidature de l\'agence "%s" (email: %s) a été approuvée. Nouvelle agence créée: ID %d',
+                    $application->getAgencyName() ?? 'N/A',
+                    $application->getAgencyEmail() ?? 'N/A',
+                    $result['agencyId'] ?? 'N/A'
+                ),
+                'APPLICATION_APPROVED',
+                ['applicationId' => $application->getId(), 'agencyId' => $result['agencyId'] ?? null, 'agencyName' => $application->getAgencyName()]
+            );
 
             return $this->json([
                 'success' => true,
@@ -296,7 +325,11 @@ class AdminApplicationController extends AbstractController
         }
 
         $application->setStatus('UNDER_REVIEW');
-        $application->setReviewer($this->getUser()?->getEmail() ?? 'System');
+        $currentUser = $this->getUser();
+        $reviewer = ($currentUser instanceof User && method_exists($currentUser, 'getEmail'))
+            ? $currentUser->getEmail()
+            : ($currentUser instanceof User ? $currentUser->getPhoneNumber() : 'System');
+        $application->setReviewer($reviewer ?? 'System');
         $application->setReviewedAt(new \DateTime());
 
         $this->em->persist($application);

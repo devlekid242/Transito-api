@@ -26,6 +26,7 @@ use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use App\Repository\ReservationRepository;
+use App\Repository\AgentRepository;
 
 class BookingController extends AbstractController
 {
@@ -42,7 +43,7 @@ class BookingController extends AbstractController
     /** Nombre maximum de passagers autorisés sur une seule réservation. */
     private const MAX_PASSENGERS_PER_BOOKING = 10;
 
-    
+
     public function __construct(
         private EntityManagerInterface $em,
         private NotificationBroadcastService $notificationBroadcaster,
@@ -50,6 +51,7 @@ class BookingController extends AbstractController
         private DomainStateTransitionService $stateTransitions,
         private AuditLogger $auditLogger,
         private RescheduleQuoteService $rescheduleQuoteService,
+        private AdminNotificationService $adminNotificationService, // 👈 AJOUTER CETTE LIGNE
         #[Autowire('%env(int:PAYMENT_RESERVATION_TTL_MINUTES)%')] private int $paymentReservationTtlMinutes,
     ) {}
 
@@ -72,6 +74,12 @@ class BookingController extends AbstractController
         $passengers = $data['passengers'] ?? [];
         $baggages = $data['baggages'] ?? [];
         $requestedSeatNumbers = $data['seatNumbers'] ?? $data['seat_numbers'] ?? null;
+        // Points d'embarquement / débarquement choisis par le client (libellés
+        // texte proposés à partir des points d'arrêt du trajet). Optionnels côté
+        // validation pour ne pas casser les réservations existantes qui n'en
+        // enverraient pas, mais systématiquement enregistrés dès qu'ils sont fournis.
+        $boardingPoint = trim((string)($data['boardingPoint'] ?? ''));
+        $deboardingPoint = trim((string)($data['deboardingPoint'] ?? ''));
         // NOTE SÉCURITÉ : `totalPrice` envoyé par le client n'est utilisé que pour
         // information ; le montant réellement facturé est TOUJOURS recalculé
         // ci-dessous à partir du prix du trajet en base (voir $computedTotal).
@@ -198,6 +206,8 @@ class BookingController extends AbstractController
             $reservation->setUser($user);
             $reservation->setTrip($trip);
             $reservation->setTotalAmount($computedTotal);
+            $reservation->setBoardingPoint($boardingPoint !== '' ? $boardingPoint : null);
+            $reservation->setDeboardingPoint($deboardingPoint !== '' ? $deboardingPoint : null);
 
             $paymentPhone = $data['paymentPhone'] ?? (method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : '');
             $reservation->setPaymentPhone($paymentPhone ?: '');
@@ -214,7 +224,9 @@ class BookingController extends AbstractController
             // Sans expiration, un abandon du paiement bloquait définitivement
             // la capacité du voyage. 15 minutes est la durée de réservation
             // temporaire avant libération automatique.
-            $reservation->setPaymentExpiresAt((new \DateTimeImmutable())->modify(sprintf('+%d minutes', max(1, $this->paymentReservationTtlMinutes))));
+            // $reservation->setPaymentExpiresAt((new \DateTimeImmutable())->modify(sprintf('+%d minutes', max(1, $this->paymentReservationTtlMinutes))));
+            $reservation->setPaymentExpiresAt((new \DateTime())->modify(sprintf('+%d minutes', max(1, $this->paymentReservationTtlMinutes)))
+            );
 
             $this->em->persist($reservation);
 
@@ -586,7 +598,10 @@ class BookingController extends AbstractController
         $connection->beginTransaction();
         try {
             $reservation = $this->em->getRepository(Reservation::class)->find($id, LockMode::PESSIMISTIC_WRITE);
-            if (!$reservation || $reservation->getUser()?->getId() !== $user->getId()) { $connection->rollBack(); return new JsonResponse(['error' => 'Réservation introuvable.'], 404); }
+            if (!$reservation || $reservation->getUser()?->getId() !== $user->getId()) {
+                $connection->rollBack();
+                return new JsonResponse(['error' => 'Réservation introuvable.'], 404);
+            }
             $data = json_decode($request->getContent(), true) ?? [];
             $quote = $this->rescheduleQuoteService->quote($reservation, (int) ($data['trip_id'] ?? 0), $data['seatNumbers'] ?? $data['seat_numbers'] ?? null);
             $existing = $this->em->getRepository(ReservationReschedule::class)->findOneBy(['reservation' => $reservation]);
@@ -750,7 +765,7 @@ class BookingController extends AbstractController
             $allTickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
             $tickets = array_values(array_filter(
                 $allTickets,
-                static fn (Ticket $ticket) => in_array($ticket->getStatus(), ['en_attente', 'embarque'], true)
+                static fn(Ticket $ticket) => in_array($ticket->getStatus(), ['en_attente', 'embarque'], true)
             ));
             $ticketCount = count($tickets);
             if ($ticketCount < 1) {
@@ -842,11 +857,14 @@ class BookingController extends AbstractController
 
             $reservation->setTrip($newTrip)
                 ->incrementRescheduleCount()
-                ->setLastRescheduledAt(new \DateTimeImmutable());
+                ->setLastRescheduledAt(new \DateTime());
             $this->em->persist($history);
             $this->em->persist($reservation);
             $this->em->flush();
-            $this->auditLogger->record('BOOKING_RESCHEDULED', 'Reservation', (string) $reservation->getId(),
+            $this->auditLogger->record(
+                'BOOKING_RESCHEDULED',
+                'Reservation',
+                (string) $reservation->getId(),
                 ['tripId' => $fromTrip->getId(), 'rescheduleCount' => $reservation->getRescheduleCount() - 1],
                 ['tripId' => $newTrip->getId(), 'rescheduleCount' => $reservation->getRescheduleCount()],
                 ['source' => 'booking.reschedule', 'fromTripId' => $fromTrip->getId(), 'toTripId' => $newTrip->getId()]
@@ -1128,6 +1146,99 @@ class BookingController extends AbstractController
         ], 200);
     }
 
+    /**
+     * Liste complète des réservations effectuées sur les voyages de l'agence
+     * connectée (contrairement à /agency/recent-bookings qui n'en montre qu'un
+     * échantillon récent pour le tableau de bord).
+     */
+    #[Route('/api/agency/reservations', name: 'api_agency_reservations_list', methods: ['GET'])]
+    public function getReservations(
+        Request $request,
+        ReservationRepository $reservationRepository,
+        AgentRepository $agentRepository,
+    ): JsonResponse {
+        $user = $this->getUser();
+        if (!$user) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agent = $agentRepository->findOneBy(['user' => $user]);
+        if (!$agent || !$agent->getAgency()) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $qb = $reservationRepository->createQueryBuilder('r')
+            ->join('r.trip', 't')
+            ->andWhere('t.agency = :agency')
+            ->setParameter('agency', $agent->getAgency())
+            ->orderBy('r.createdAt', 'DESC');
+
+        // Filtres optionnels (facultatif, à ajouter si besoin plus tard) :
+        // ?status=paye|en_attente|annule|rembourse
+        if ($status = $request->query->get('paymentStatus')) {
+            $qb->andWhere('r.paymentStatus = :status')->setParameter('status', $status);
+        }
+
+        $reservations = $qb->getQuery()->getResult();
+
+        return $this->json([
+            'success' => true,
+            'data' => array_map([$this, 'mapReservationForAgency'], $reservations),
+        ]);
+    }
+
+    /**
+     * Même forme que BookingController::mapReservation(), mais scopée au
+     * contexte agence (pas de canCancel/refund côté client). Si vous préférez
+     * éviter la duplication, extrayez la logique commune de
+     * BookingController::mapReservation() dans un service partagé
+     * (ex: App\Service\ReservationPresenter) réutilisé par les deux contrôleurs.
+     */
+    private function mapReservationForAgency(Reservation $reservation): array
+    {
+        $trip = $reservation->getTrip();
+        $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
+        $seatNumbers = array_map(fn($t) => (string) $t->getSeatNumber(), $tickets);
+        $passengerName = $tickets[0]?->getPassengerName() ?? '';
+        $passengerPhone = $tickets[0]?->getPassengerPhone() ?? $reservation->getPaymentPhone();
+
+        $statusLabels = [
+            'paye' => 'Confirmé',
+            'en_attente' => 'En attente',
+            'echoue' => 'Annulé',
+            'annule' => 'Annulé',
+            'rembourse' => 'Remboursé',
+        ];
+
+        return [
+            'id' => $reservation->getId(),
+            'reference' => 'RES-' . $reservation->getId(),
+            'passengerName' => $passengerName,
+            'passengerPhone' => $passengerPhone,
+            'passengerEmail' => $reservation->getUser()?->getEmail() ?? '',
+            'seatNumber' => implode(', ', $seatNumbers),
+            'totalPrice' => (float) $reservation->getTotalAmount(),
+            'status' => $statusLabels[$reservation->getPaymentStatus()] ?? 'En attente',
+            'boardingPoint' => $reservation->getBoardingPoint(),
+            'deboardingPoint' => $reservation->getDeboardingPoint(),
+            'trip' => $trip ? [
+                'id' => $trip->getId(),
+                'departureCity' => $trip->getDepartureCity(),
+                'arrivalCity' => $trip->getArrivalCity(),
+                'departureDate' => $trip->getDepartureTime()?->format('Y-m-d'),
+                'departureTime' => $trip->getDepartureTime()?->format('c'),
+            ] : null,
+            'tickets' => array_map(fn($t) => [
+                'id' => $t->getId(),
+                'seatNumber' => $t->getSeatNumber(),
+                'passengerName' => $t->getPassengerName(),
+                'passengerPhone' => $t->getPassengerPhone(),
+                'status' => $t->getStatus(),
+            ], $tickets),
+            'createdAt' => $reservation->getCreatedAt()?->format('c'),
+        ];
+    }
+
     private function mapReservation(Reservation $reservation): array
     {
         $trip = $reservation->getTrip();
@@ -1138,6 +1249,27 @@ class BookingController extends AbstractController
         $passengerPhone = $tickets[0]?->getPassengerPhone() ?? $reservation->getPaymentPhone();
         $passengerEmail = $user?->getEmail() ?? '';
         $ticketStatus = $tickets[0]?->getStatus();
+
+        // 👈 NOUVEAU : un statut affiché "Annulé" peut recouvrir 2 réalités très
+        // différentes pour l'utilisateur :
+        //  - annulation système suite à un paiement jamais abouti (paymentStatus
+        //    'echoue', ou 'annule' déclenché avant tout paiement réussi) -> AUCUN
+        //    remboursement n'est dû, il n'y a jamais eu d'argent débité.
+        //  - annulation demandée par le client APRÈS un paiement réussi -> un
+        //    remboursement est réellement engagé (voir cancel(), $wasPaid).
+        // On expose ici la même information que cancel() calcule déjà
+        // ($wasPaid + création d'un PaymentLog 'REFUND_*'), pour que la liste
+        // des réservations et le détail du billet puissent distinguer les deux
+        // cas sans deviner à partir du seul statut affiché.
+        $refundLog = $this->em->getRepository(PaymentLog::class)->createQueryBuilder('p')
+            ->where('p.reservation = :reservation')
+            ->andWhere('p.status LIKE :refundPrefix')
+            ->setParameter('reservation', $reservation)
+            ->setParameter('refundPrefix', 'REFUND%')
+            ->orderBy('p.id', 'DESC')
+            ->setMaxResults(1)
+            ->getQuery()
+            ->getOneOrNullResult();
 
         $status = 'En attente';
         if ($reservation->getPaymentStatus() === 'rembourse') {
@@ -1192,7 +1324,20 @@ class BookingController extends AbstractController
             'seatNumber' => implode(', ', $seatNumbers),
             'totalPrice' => (float)$reservation->getTotalAmount(),
             'status' => $status,
+            // Renseignés par le client à la réservation (voir create()) ;
+            // affichés sur le billet pour que le passager et le chauffeur
+            // sachent où l'embarquement/débarquement doit se faire.
+            'boardingPoint' => $reservation->getBoardingPoint(),
+            'deboardingPoint' => $reservation->getDeboardingPoint(),
             'paymentExpiresAt' => $reservation->getPaymentExpiresAt()?->format(\DateTimeInterface::ATOM),
+            // Non-null UNIQUEMENT si un paiement avait réellement été effectué
+            // avant l'annulation (voir cancel()) : permet au front de distinguer
+            // "annulation avec remboursement en cours" de "annulation système
+            // pour paiement jamais abouti, rien à rembourser".
+            'refund' => $refundLog ? [
+                'status' => $refundLog->getStatus(), // REFUND_PENDING | REFUNDED | REFUND_FAILED
+                'amount' => $refundLog->getAmount(),
+            ] : null,
             'canCancel' => !$hasBoardedTicket && $status !== 'Annulé' && $status !== 'Expiré' && $trip && $trip->getDepartureTime() && (($trip->getDepartureTime()->getTimestamp() - (new \DateTime())->getTimestamp()) / 3600) > self::CANCELLATION_MIN_HOURS_BEFORE_DEPARTURE,
             'bookingDate' => $departureTime ? $departureTime->format('c') : $reservation->getCreatedAt()?->format('c'),
             'trip' => $trip ? [

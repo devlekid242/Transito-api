@@ -23,6 +23,7 @@ use App\Repository\WalletTransactionRepository;
 use App\Service\StatusMapperService;
 use App\Service\AgencyOperationalImpactService;
 use App\Service\AuditLogger;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -53,6 +54,7 @@ class AdminAgencyController extends AbstractController
         private StatusMapperService $statusMapperService,
         private AgencyOperationalImpactService $agencyOperationalImpactService,
         private AuditLogger $auditLogger,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     /**
@@ -261,6 +263,7 @@ class AdminAgencyController extends AbstractController
                 $user->setFullName($adminData['name']);
                 $user->setEmail($adminData['email']);
                 $user->setPhoneNumber($adminData['phone']);
+                $user->setRoles(['ROLE_USER','ROLE_PARTNER']);
                 // villeResidence est obligatoire en base mais n'est pas collecté par ce
                 // formulaire de création interne (réservé au formulaire d'inscription passager).
                 $user->setVilleResidence($agency->getCity() ?: 'Non renseigné');
@@ -284,6 +287,14 @@ class AdminAgencyController extends AbstractController
                 'message' => "Erreur lors de la création de l'agence et du compte administrateur",
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
+
+        // 👈 Notifier les admins de la création d'une nouvelle agence
+        $this->adminNotificationService->notifyEvent(
+            'Nouvelle agence créée',
+            sprintf('L\'agence "%s" (email: %s) a été créée avec succès.', $agency->getName(), $agency->getEmail()),
+            'AGENCY_CREATED',
+            ['agencyId' => $agency->getId(), 'agencyName' => $agency->getName(), 'adminEmail' => $agency->getEmail()]
+        );
 
         return $this->json([
             'success' => true,
@@ -356,7 +367,7 @@ class AdminAgencyController extends AbstractController
 
         $adminData = $data['admin'] ?? null;
         // return $this->Json($data, Response::HTTP_BAD_REQUEST);
-        
+
         if (is_array($adminData)) {
             $adminAgence = $this->em->getRepository(Agent::class)->findOneBy([
                 'agency' => $agency,
@@ -383,6 +394,23 @@ class AdminAgencyController extends AbstractController
 
         $this->em->persist($agency);
         $this->em->flush();
+
+        // 👈 Notifier les admins de la modification de l'agence
+        $notificationDetails = [];
+        if (array_key_exists('status', $data)) {
+            $notificationDetails[] = sprintf('Statut: %s', $data['status']);
+        }
+        if (array_key_exists('commissionRate', $data)) {
+            $notificationDetails[] = sprintf('Commission: %s%%', $data['commissionRate']);
+        }
+        if (!empty($notificationDetails)) {
+            $this->adminNotificationService->notifyEvent(
+                'Agence mise à jour',
+                sprintf('L\'agence "%s" a été modifiée. Changements: %s', $agency->getName(), implode(', ', $notificationDetails)),
+                'AGENCY_UPDATED',
+                ['agencyId' => $agency->getId(), 'agencyName' => $agency->getName(), 'changes' => $notificationDetails]
+            );
+        }
 
         return $this->json([
             'success' => true,
@@ -506,6 +534,14 @@ class AdminAgencyController extends AbstractController
         $agency->setStatus('suspended');
         $this->em->persist($agency);
         $this->em->flush();
+
+        // 👈 Notifier les admins de la suppression de l'agence
+        $this->adminNotificationService->notifyEvent(
+            'Agence supprimée',
+            sprintf('L\'agence "%s" (ID: %d) a été supprimée (suspendue).', $agency->getName(), $agency->getId()),
+            'AGENCY_DELETED',
+            ['agencyId' => $agency->getId(), 'agencyName' => $agency->getName()]
+        );
 
         return $this->json([
             'success' => true,
@@ -850,6 +886,165 @@ class AdminAgencyController extends AbstractController
         ]);
     }
 
+    #[Route('/payout-msisdn/pending', name: 'api_admin_agencies_payout_msisdn_pending', methods: ['GET'])]
+    public function pendingPayoutMsisdnRequests(): JsonResponse
+    {
+        $agencies = $this->agencyRepository->createQueryBuilder('a')
+            ->where('a.pendingPayoutMsisdn IS NOT NULL')
+            ->orderBy('a.pendingPayoutMsisdnRequestedAt', 'ASC')
+            ->getQuery()->getResult();
+
+        $out = array_map(fn(Agency $a) => [
+            'agencyId' => $a->getId(),
+            'agencyName' => $a->getName(),
+            'currentPayoutMsisdn' => $a->getPayoutMsisdn(),
+            'pendingPayoutMsisdn' => $a->getPendingPayoutMsisdn(),
+            'requestedAt' => $a->getPendingPayoutMsisdnRequestedAt()?->format(\DateTimeInterface::ATOM),
+        ], $agencies);
+
+        return $this->json($out);
+    }
+
+    #[Route('/{id}/payout-msisdn/approve', name: 'api_admin_agencies_payout_msisdn_approve', methods: ['POST'])]
+    public function approvePayoutMsisdn(int $id): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+        if (!$agency->hasPendingPayoutMsisdn()) {
+            return $this->json(['message' => 'Aucune proposition en attente pour cette agence.'], Response::HTTP_CONFLICT);
+        }
+
+        $previous = $agency->getPayoutMsisdn();
+        $agency->setPayoutMsisdn($agency->getPendingPayoutMsisdn());
+        $agency->setPendingPayoutMsisdn(null);
+        $agency->setPendingPayoutMsisdnRequestedAt(null);
+
+        $this->em->persist($agency);
+        $this->em->flush();
+
+        $this->auditLogger->record(
+            'AGENCY_PAYOUT_MSISDN_APPROVED',
+            'Agency',
+            (string) $agency->getId(),
+            ['payoutMsisdn' => $previous],
+            ['payoutMsisdn' => $agency->getPayoutMsisdn()],
+            ['source' => 'admin.agency.payout-msisdn.approve']
+        );
+
+        return $this->json(['message' => 'Numéro de versement validé.', 'payoutMsisdn' => $agency->getPayoutMsisdn()]);
+    }
+
+    #[Route('/{id}/payout-msisdn/reject', name: 'api_admin_agencies_payout_msisdn_reject', methods: ['POST'])]
+    public function rejectPayoutMsisdn(int $id, Request $request): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+        if (!$agency->hasPendingPayoutMsisdn()) {
+            return $this->json(['message' => 'Aucune proposition en attente pour cette agence.'], Response::HTTP_CONFLICT);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+        $rejected = $agency->getPendingPayoutMsisdn();
+        $agency->setPendingPayoutMsisdn(null);
+        $agency->setPendingPayoutMsisdnRequestedAt(null);
+
+        $this->em->persist($agency);
+        $this->em->flush();
+
+        $this->auditLogger->record(
+            'AGENCY_PAYOUT_MSISDN_REJECTED',
+            'Agency',
+            (string) $agency->getId(),
+            ['pendingPayoutMsisdn' => $rejected],
+            ['pendingPayoutMsisdn' => null],
+            ['source' => 'admin.agency.payout-msisdn.reject', 'reason' => $data['reason'] ?? null]
+        );
+
+        return $this->json(['message' => 'Proposition rejetée.']);
+    }
+
+    /**
+     * Approuve un document KYC d'une agence : passe son statut à "approved".
+     * Le statut KYC global de l'agence (voir normalizeAgencyWithStats) est
+     * recalculé automatiquement à partir des statuts de tous ses documents.
+     */
+    #[Route('/{id}/documents/{documentId}/approve', name: 'api_admin_agencies_document_approve', requirements: ['id' => '\d+', 'documentId' => '\d+'], methods: ['POST'])]
+    public function approveDocument(int $id, int $documentId): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $document = $this->em->getRepository(AgencyDocument::class)->find($documentId);
+        if (!$document || $document->getAgency()?->getId() !== $agency->getId()) {
+            return $this->json(['success' => false, 'message' => 'Document introuvable pour cette agence.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $before = ['status' => $document->getStatus()];
+        $document->setStatus('approved');
+        $this->em->persist($document);
+        $this->em->flush();
+
+        $this->auditLogger->record(
+            'AGENCY_DOCUMENT_APPROVED',
+            'AgencyDocument',
+            (string) $document->getId(),
+            $before,
+            ['status' => 'approved'],
+            ['source' => 'admin.agency.document.approve', 'agencyId' => $agency->getId()]
+        );
+
+        return $this->json([
+            'success' => true,
+            'message' => 'Document validé avec succès.',
+            'data' => $this->normalizeDocument($document),
+        ]);
+    }
+
+    /**
+     * Rejette un document KYC d'une agence : passe son statut à "rejected".
+     */
+    #[Route('/{id}/documents/{documentId}/reject', name: 'api_admin_agencies_document_reject', requirements: ['id' => '\d+', 'documentId' => '\d+'], methods: ['POST'])]
+    public function rejectDocument(int $id, int $documentId, Request $request): JsonResponse
+    {
+        $agency = $this->agencyRepository->find($id);
+        if (!$agency) {
+            return $this->json(['success' => false, 'message' => 'Agence introuvable.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $document = $this->em->getRepository(AgencyDocument::class)->find($documentId);
+        if (!$document || $document->getAgency()?->getId() !== $agency->getId()) {
+            return $this->json(['success' => false, 'message' => 'Document introuvable pour cette agence.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+
+        $before = ['status' => $document->getStatus()];
+        $document->setStatus('rejected');
+        $this->em->persist($document);
+        $this->em->flush();
+
+        $this->auditLogger->record(
+            'AGENCY_DOCUMENT_REJECTED',
+            'AgencyDocument',
+            (string) $document->getId(),
+            $before,
+            ['status' => 'rejected'],
+            ['source' => 'admin.agency.document.reject', 'agencyId' => $agency->getId(), 'reason' => $data['reason'] ?? null]
+        );
+
+        return $this->json([
+            'success' => true,
+            'message' => 'Document rejeté.',
+            'data' => $this->normalizeDocument($document),
+        ]);
+    }
+
     /**
      * Normalize agency for JSON response.
      */
@@ -876,8 +1071,12 @@ class AdminAgencyController extends AbstractController
             'description' => $agency->getDescription(),
             'status' => $agency->getStatus(),
             'ratingCache' => $agency->getRatingCache(),
+            'city' => $agency->getCity(),
             'commissionRate' => $agency->getCommissionRate(),
             'createdAt' => $agency->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+            'payoutMsisdn' => $agency->getPayoutMsisdn(),
+            'pendingPayoutMsisdn' => $agency->getPendingPayoutMsisdn(),
+            'pendingPayoutMsisdnRequestedAt' => $agency->getPendingPayoutMsisdnRequestedAt()?->format(\DateTimeInterface::ATOM),
             'admin' => $adminAgence ? [
                 'id' => $adminAgence->getUser()?->getId(),
                 'name' => $adminAgence->getUser()?->getFullName(),
@@ -926,6 +1125,7 @@ class AdminAgencyController extends AbstractController
         }
 
         $data['kyc'] = $kycStatus;
+        $data['documents'] = array_map([$this, 'normalizeDocument'], $documents->toArray());
 
         // Add wallet info
         $wallet = $agency->getWallet();
@@ -947,6 +1147,22 @@ class AdminAgencyController extends AbstractController
         $data['boardingPointsCount'] = $this->em->getRepository(AgencyPoint::class)->count(['agency' => $agency]);
 
         return $data;
+    }
+
+    /**
+     * Normalize an agency document for JSON response.
+     */
+    private function normalizeDocument(AgencyDocument $document): array
+    {
+        return [
+            'id' => $document->getId(),
+            'name' => $document->getName(),
+            'fileUrl' => $document->getFileUrl(),
+            'type' => $document->getType(),
+            'status' => $document->getStatus(),
+            'expiryDate' => $document->getExpiryDate()?->format(\DateTimeInterface::ATOM),
+            'createdAt' => $document->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+        ];
     }
 
     /**

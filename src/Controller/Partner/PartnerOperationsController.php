@@ -13,6 +13,7 @@ use App\Repository\AgencyPointRepository;
 use App\Repository\BusRepository;
 use App\Repository\TripRepository;
 use App\Service\WalletService;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -36,6 +37,7 @@ class PartnerOperationsController extends AbstractController
         private AgencyPointRepository $pointRepository,
         private WalletService $walletService,
         private UserPasswordHasherInterface $passwordHasher,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     #[Route('/context', name: 'api_partner_context', methods: ['GET'])]
@@ -163,6 +165,14 @@ class PartnerOperationsController extends AbstractController
         $this->em->persist($agent);
         $this->em->flush();
 
+        // 👈 Notifier les admins d'un nouvel agent créé
+        $this->adminNotificationService->notifyEvent(
+            'Nouvel agent créé',
+            sprintf('L\'agence "%s" a créé un nouvel agent: "%s" (rôle: %s).', $agency->getName(), $fullName, $role),
+            'AGENT_CREATED',
+            ['agentId' => $agent->getId(), 'agencyId' => $agency->getId(), 'agencyName' => $agency->getName()]
+        );
+
         return $this->json($this->agentPayload($agent), Response::HTTP_CREATED);
     }
 
@@ -240,7 +250,9 @@ class PartnerOperationsController extends AbstractController
             return $this->json(['message' => 'Agent introuvable.'], Response::HTTP_NOT_FOUND);
         }
 
-        if ($agent->getUser()?->getId() === $this->getUser()?->getId()) {
+        $currentUser = $this->getUser();
+        $agentUser = $agent->getUser();
+        if ($currentUser instanceof User && $agentUser instanceof User && $agentUser->getId() === $currentUser->getId()) {
             return $this->json(['message' => 'Vous ne pouvez pas désactiver votre propre compte depuis cet écran.'], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
@@ -268,6 +280,7 @@ class PartnerOperationsController extends AbstractController
 
     private function getCurrentAgent(): ?Agent
     {
+        /** @var User */
         $user = $this->getUser();
         return $user instanceof User ? $this->agentRepository->findOneBy(['user' => $user]) : null;
     }

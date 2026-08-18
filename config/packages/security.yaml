@@ -40,8 +40,9 @@ security:
         - { path: ^/api/auth/register, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/refresh, roles: PUBLIC_ACCESS }
-        - { path: ^/api/auth/request-reset, roles: PUBLIC_ACCESS }
-        - { path: ^/api/auth/verify-reset, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/request-otp, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/verify-otp, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/complete-profil, roles: PUBLIC_ACCESS }
         - { path: ^/api$|^\/api\/docs, roles: PUBLIC_ACCESS }
         - { path: ^/api/contexts, roles: PUBLIC_ACCESS }
         - { path: ^/api/pusher/auth, roles: PUBLIC_ACCESS }

@@ -16,6 +16,7 @@ use App\Repository\PaymentLogRepository;
 use App\Repository\ReservationRepository;
 use App\Repository\TicketRepository;
 use App\Repository\UserRepository;
+use App\Service\AdminNotificationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -42,6 +43,7 @@ class AdminUserController extends AbstractController
         private ReservationRepository $reservationRepository,
         private PaymentLogRepository $paymentLogRepository,
         private TicketRepository $ticketRepository,
+        private AdminNotificationService $adminNotificationService,
     ) {}
 
     /**
