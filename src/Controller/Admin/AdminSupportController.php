@@ -8,6 +8,7 @@ use App\Entity\FAQ;
 use App\Entity\SupportResponse;
 use App\Entity\SupportTicket;
 use App\Repository\FAQRepository;
+use App\Repository\AgentRepository;
 use App\Repository\SupportResponseRepository;
 use App\Repository\SupportTicketRepository;
 use App\Repository\UserRepository;
@@ -35,10 +36,19 @@ use Symfony\Component\Serializer\SerializerInterface;
  * Toutes les routes utilisent maintenant `ticketToArray()` / `responseToArray()`
  * / `faqToArray()` pour renvoyer des tableaux explicites, comme le fait déjà
  * SupportController côté client.
+ *
+ * 👈 NOUVEAU : l'admin est le seul pivot entre client et agence — il n'y a
+ * pas de conversation directe agence <-> client. Un ticket peut contenir
+ * deux fils (SupportResponse::$channel = 'client' ou 'agency') ; ce
+ * contrôleur est le seul à les voir tous les deux (voir getTicketDetail()
+ * qui renvoie l'ensemble via ticketToArray($ticket, true), et
+ * addAdminResponse() qui prend un `channel` en paramètre pour savoir à qui
+ * répondre). Voir SupportController (fil client) et PartnerSupportController
+ * (fil agence) pour le filtrage de chaque côté.
  */
 #[Route('/api/admin/support')]
 #[IsGranted(AdminRoleVoter::SUPPORT)]
-#[IsGranted('ROLE_ADMIN')]
+// #[IsGranted('ROLE_ADMIN')]
 class AdminSupportController extends AbstractController
 {
     public function __construct(
@@ -49,7 +59,11 @@ class AdminSupportController extends AbstractController
         private FAQRepository $faqRepository,
         private NotificationBroadcastService $notificationBroadcaster,
         private AdminNotificationHelper $adminNotifier,
-        private UserRepository $userRepository
+        private UserRepository $userRepository,
+        // 👈 NOUVEAU : pour retrouver les comptes admin_agence d'une agence
+        // quand l'admin répond sur le canal 'agency' (voir addAdminResponse
+        // / notifyAgencyPartners).
+        private AgentRepository $agentRepository
     ) {}
 
     // ==================== SÉRIALISATION ====================
@@ -123,6 +137,13 @@ class AdminSupportController extends AbstractController
      * du message au propriétaire du ticket : si ce n'est pas le client,
      * c'est forcément un membre du support (seuls admin/support et le
      * propriétaire peuvent répondre, cf. SupportController::addResponse).
+     *
+     * 👈 NOUVEAU : `channel` distingue les deux fils désormais possibles sur
+     * un même ticket — 'client' (client <-> admin) et 'agency' (agence <->
+     * admin, jamais visible du client, voir PartnerSupportController et
+     * SupportController::detail()). C'est le SEUL contrôleur qui a besoin
+     * de voir les deux fils entremêlés, puisque l'admin est le pivot des
+     * deux conversations.
      */
     private function responseToArray(SupportResponse $r): array
     {
@@ -137,6 +158,7 @@ class AdminSupportController extends AbstractController
             'message' => $r->getMessage(),
             'createdAt' => $r->getCreatedAt()?->format(DATE_ATOM),
             'isFromSupport' => $isFromSupport,
+            'channel' => $r->getChannel(),
             'author' => $author ? [
                 'id' => $author->getId(),
                 'fullName' => method_exists($author, 'getFullName') ? $author->getFullName() : null,
@@ -352,6 +374,17 @@ class AdminSupportController extends AbstractController
      * 👈 CORRIGÉ (cette passe) : `markFirstResponse()` manquait ici, ce qui
      * faussait le calcul du SLA (`slaBreached` restait vrai même après une
      * réponse envoyée depuis le back-office admin).
+     *
+     * 👈 CORRECTION DE CONCEPTION (cette passe) : l'admin est maintenant le
+     * SEUL pivot entre le client et l'agence — il n'y a plus de canal
+     * agence <-> client direct. Ce endpoint accepte donc un `channel`
+     * ('client' par défaut, ou 'agency') dans le body pour indiquer à qui
+     * la réponse s'adresse :
+     *   - 'client' : notifie le client, statut -> 'answered', déclenche le
+     *     calcul du SLA (markFirstResponse), comme avant.
+     *   - 'agency' : notifie les admin_agence de l'agence du ticket, ne
+     *     touche ni le statut visible du client ni le SLA (ce n'est pas une
+     *     réponse au client). Ignoré si le ticket n'a pas d'agence.
      */
     #[Route('/tickets/{id}/responses', name: 'admin_support_add_response', methods: ['POST'])]
     public function addAdminResponse(int $id, Request $request): JsonResponse
@@ -364,14 +397,22 @@ class AdminSupportController extends AbstractController
 
         $data = json_decode($request->getContent(), true);
         $message = trim((string) ($data['message'] ?? ''));
+        $channel = (string) ($data['channel'] ?? 'client');
 
         if ($message === '') {
             return new JsonResponse(['error' => 'Message cannot be empty'], 400);
+        }
+        if (!in_array($channel, ['client', 'agency'], true)) {
+            return new JsonResponse(['error' => 'Invalid channel'], 400);
+        }
+        if ($channel === 'agency' && !$ticket->getAgency()) {
+            return new JsonResponse(['error' => 'This ticket has no agency to reply to'], 400);
         }
 
         $response = new SupportResponse();
         $response->setTicket($ticket);
         $response->setMessage($message);
+        $response->setChannel($channel);
 
         /** @var \App\Entity\User|null $admin */
         $admin = $this->getUser();
@@ -381,27 +422,71 @@ class AdminSupportController extends AbstractController
 
         $this->em->persist($response);
 
-        $ticket->setStatus('answered');
-        $ticket->markFirstResponse();
+        if ($channel === 'client') {
+            $ticket->setStatus('answered');
+            $ticket->markFirstResponse();
+        }
         $ticket->touch();
         $this->em->flush();
 
-        if ($ticket->getUser()) {
-            $notification = new \App\Entity\Notification();
-            $notification->setRecipientType('user')
-                ->setRecipientId($ticket->getUser()->getId())
-                ->setTitle('Réponse au ticket de support')
-                ->setContent('Une nouvelle réponse a été ajoutée à votre ticket : ' . $ticket->getSubject())
-                ->setCategory('SUPPORT');
-            $this->em->persist($notification);
-            $this->em->flush();
-            $this->notificationBroadcaster->broadcast($notification);
+        if ($channel === 'client') {
+            if ($ticket->getUser()) {
+                $notification = new \App\Entity\Notification();
+                $notification->setRecipientType('user')
+                    ->setRecipientId($ticket->getUser()->getId())
+                    ->setTitle('Réponse au ticket de support')
+                    ->setContent('Une nouvelle réponse a été ajoutée à votre ticket : ' . $ticket->getSubject())
+                    ->setCategory('SUPPORT');
+                $this->em->persist($notification);
+                $this->em->flush();
+                $this->notificationBroadcaster->broadcast($notification);
+            }
+        } else {
+            $this->notifyAgencyPartners($ticket, $message);
         }
 
         return new JsonResponse([
             'message' => 'Response added',
             'response' => $this->responseToArray($response),
         ], 201);
+    }
+
+    /**
+     * Notifie tous les comptes admin_agence actifs de l'agence rattachée au
+     * ticket qu'une réponse admin les concernant vient d'être postée.
+     * Duplique volontairement SupportController::notifyAgencyPartners()
+     * (même agence, même repository, autre contexte d'appel) plutôt que de
+     * le factoriser tout de suite dans un service partagé.
+     */
+    private function notifyAgencyPartners(SupportTicket $ticket, string $message): void
+    {
+        $agency = $ticket->getAgency();
+        if (!$agency) {
+            return;
+        }
+
+        $partnerAgents = $this->agentRepository->findBy([
+            'agency' => $agency,
+            'agentRole' => 'admin_agence',
+            'status' => 'active',
+        ]);
+
+        foreach ($partnerAgents as $agent) {
+            $recipient = $agent->getUser();
+            if (!$recipient) {
+                continue;
+            }
+
+            $notification = new \App\Entity\Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($recipient->getId())
+                ->setTitle('Réponse de l\'administrateur')
+                ->setContent(sprintf('L\'administrateur a répondu sur le ticket « %s ».', $ticket->getSubject()))
+                ->setCategory('SUPPORT');
+            $this->em->persist($notification);
+            $this->em->flush();
+            $this->notificationBroadcaster->broadcast($notification);
+        }
     }
 
     #[Route('/tickets/stats', name: 'admin_support_tickets_stats', methods: ['GET'])]

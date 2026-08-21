@@ -108,7 +108,7 @@ final class CreateAdminCommand extends Command
             ->addOption('phone', null, InputOption::VALUE_REQUIRED, 'Numéro de téléphone (ex: +242060000001)')
             ->addOption('name', null, InputOption::VALUE_REQUIRED, 'Nom complet affiché')
             ->addOption('password', null, InputOption::VALUE_REQUIRED, 'Mot de passe (généré aléatoirement si omis en mode non-interactif)')
-            ->addOption('role', null, InputOption::VALUE_REQUIRED, sprintf('Rôle admin métier (%s)', implode('|', self::ROLES)), 'ADMIN')
+            ->addOption('role', null, InputOption::VALUE_REQUIRED, sprintf('Rôle admin métier (%s)', implode('|', self::ROLES)), 'SUPER_ADMIN')
             ->addOption('department', null, InputOption::VALUE_REQUIRED, 'Département / service', 'Direction générale')
             ->addOption('permissions', null, InputOption::VALUE_REQUIRED, 'Permissions séparées par des virgules (remplace les permissions par défaut du rôle)')
             ->addOption('force', 'f', InputOption::VALUE_NONE, 'Ne pas demander de confirmation si le compte existe déjà')

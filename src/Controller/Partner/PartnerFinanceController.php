@@ -67,8 +67,10 @@ class PartnerFinanceController extends AbstractController
         if ($idempotencyKey !== '') {
             $existingWithdrawal = $this->em->getRepository(WithdrawalRequest::class)->findOneBy(['idempotencyKey' => $idempotencyKey]);
             if ($existingWithdrawal) {
-                if ($existingWithdrawal->getAgency()?->getId() !== $agency->getId()
-                    || $existingWithdrawal->getRequestedBy()?->getId() !== $user->getId()) {
+                if (
+                    $existingWithdrawal->getAgency()?->getId() !== $agency->getId()
+                    || $existingWithdrawal->getRequestedBy()?->getId() !== $user->getId()
+                ) {
                     return new JsonResponse(['message' => 'Cette Idempotency-Key est déjà utilisée pour une autre opération.'], Response::HTTP_CONFLICT);
                 }
                 return new JsonResponse([
@@ -183,7 +185,7 @@ class PartnerFinanceController extends AbstractController
             }
         }
 
-        
+
 
         // Montant actuellement dans available_balance mais qui sera débité dès
         // que l'admin traitera les remboursements en attente : à afficher comme
@@ -224,7 +226,9 @@ class PartnerFinanceController extends AbstractController
         }
 
         $netRevenue = bcsub($grossRevenue, $platformFees, 2);
-        if (bccomp($netRevenue, '0.00', 2) < 0) { $netRevenue = '0.00'; }
+        if (bccomp($netRevenue, '0.00', 2) < 0) {
+            $netRevenue = '0.00';
+        }
 
         // Les billets annulés ('annule', produits par BookingController::cancel())
         // ne doivent compter ni dans le nombre de passagers "actifs" ni dans le
@@ -234,8 +238,8 @@ class PartnerFinanceController extends AbstractController
         $ticketStats = $this->em->getRepository(Ticket::class)->createQueryBuilder('tk')
             ->select(
                 'SUM(CASE WHEN tk.status = :boarded THEN 1 ELSE 0 END) as boardedCount, ' .
-                'SUM(CASE WHEN tk.status = :cancelled THEN 1 ELSE 0 END) as cancelledCount, ' .
-                'COUNT(tk.id) as totalCount'
+                    'SUM(CASE WHEN tk.status = :cancelled THEN 1 ELSE 0 END) as cancelledCount, ' .
+                    'COUNT(tk.id) as totalCount'
             )
             ->join('tk.reservation', 'r')
             ->join('r.trip', 't')
@@ -409,12 +413,41 @@ class PartnerFinanceController extends AbstractController
 
     //     // formater la période en nombre de jours pour la requête
     //     $days = (int) substr($period, 0, -1);
-        
+
     //     $today = new \DateTimeImmutable();
     //     $startDate = $today->sub(new \DateInterval("P{$days}D"))->setTime(0, 0, 0);
 
     // }
 
+
+    #[Route('/api/payment-methods', name: 'api_payment_methods', methods: ['GET'])]
+    public function listPaymentMethods(): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $paymentMethods = $this->getPaymentMethods($user);
+
+        return new JsonResponse($paymentMethods, Response::HTTP_OK);
+    }
+
+    private function getPaymentMethods(User $user): array
+    {
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return [];
+        }
+
+        // Récupérer les méthodes de paiement disponibles pour l'agence
+        // (exemple statique ici, à adapter selon votre logique métier)
+        return [
+            ['id' => 'bank_transfer', 'name' => 'Virement bancaire'],
+            ['id' => 'MTN_MOMO', 'name' => 'MTN Mobile Money'],
+            ['id' => 'AIRTEL_MOMO', 'name' => 'Airtel Money'],
+        ];
+    }
 
     #[Route('/api/reports', name: 'api_reports', methods: ['GET'])]
     public function listReports(): JsonResponse
@@ -525,6 +558,8 @@ class PartnerFinanceController extends AbstractController
             ],
         ];
     }
+
+
 
     public function createWithdrawal(Request $request): JsonResponse
     {
@@ -789,7 +824,7 @@ class PartnerFinanceController extends AbstractController
         ], Response::HTTP_OK);
     }
 
-       /**
+    /**
      * Récupère les réservations récentes de l'agent (pour le dashboard)
      * Routes: /api/statistics/agent/recent-bookings ou /api/bookings/recent
      */
@@ -849,5 +884,72 @@ class PartnerFinanceController extends AbstractController
         }, $reservations);
 
         return new JsonResponse($bookingsData, 200);
+    }
+
+    #[Route('/api/transaction-types', name: 'api_transaction_types', methods: ['GET'])]
+    public function getTransactionTypes(): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return new JsonResponse(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $this->getAgencyForUser($user);
+        if (!$agency) {
+            return new JsonResponse(['message' => 'Aucune agence associée.'], Response::HTTP_FORBIDDEN);
+        }
+
+        // $transactionTypes = [
+        //     ['id' => 'CREDIT', 'name' => 'Crédit'],
+        //     ['id' => 'DEBIT', 'name' => 'Débit'],
+        // ];
+
+        $transactionTypes = [
+            ['id' => 'CREDIT', 'name' => 'Crédit'],
+            ['id' => 'DEBIT', 'name' => 'Débit'],
+
+            // Crédit suite au paiement confirmé d'une réservation (montant brut)
+            ['id' => 'RESERVATION_PAYMENT', 'name' => 'Paiement de réservation'],
+
+            // Crédit correspondant à la commission plateforme encaissée sur un paiement
+            ['id' => 'PLATFORM_FEE', 'name' => 'Commission plateforme'],
+
+            // Débit suite au remboursement d'une réservation déjà créditée
+            ['id' => 'REFUND', 'name' => 'Remboursement'],
+
+            // Déblocage des fonds suite à la validation du billet à l'embarquement (Solde Bloqué -> Solde Disponible)
+            ['id' => 'TICKET_BOARDED', 'name' => 'Validation du billet (Embarquement)'],
+
+            // Débit définitif du solde bloqué lorsqu'un passager ne se présente pas
+            ['id' => 'TICKET_NO_SHOW', 'name' => 'Passager non présent (No-show)'],
+
+            // Crédit correspondant au montant net conservé par la plateforme après no-show
+            ['id' => 'NO_SHOW_REVENUE', 'name' => 'Revenu issu d\'un no-show'],
+
+            // Débit : fonds gelés le temps qu'une demande de retrait soit traitée
+            ['id' => 'WITHDRAWAL_HOLD', 'name' => 'Retrait en attente (Fonds gelés)'],
+
+            // Débit définitif : le retrait a été approuvé et versé
+            ['id' => 'WITHDRAWAL_COMPLETED', 'name' => 'Retrait effectué'],
+
+            // Crédit : la demande de retrait a été rejetée, les fonds reviennent au solde disponible
+            ['id' => 'WITHDRAWAL_RELEASED', 'name' => 'Retrait rejeté (Fonds libérés)'],
+
+            // Ajustement manuel (litige, correction...)
+            ['id' => 'ADJUSTMENT', 'name' => 'Ajustement manuel'],
+
+            // Ajustement manuel par admin (crédit ou débit manuel)
+            ['id' => 'ADMIN_CREDIT', 'name' => 'Crédit administratif'],
+            ['id' => 'ADMIN_DEBIT', 'name' => 'Débit administratif'],
+            ['id' => 'RESCHEDULE_ADJUSTMENT', 'name' => 'Ajustement suite au report'],
+
+            // Gel/dégel de portefeuille
+            ['id' => 'WALLET_FREEZE', 'name' => 'Gel du portefeuille'],
+            ['id' => 'WALLET_UNFREEZE', 'name' => 'Dégel du portefeuille'],
+        ];
+
+
+
+        return new JsonResponse($transactionTypes, 200);
     }
 }

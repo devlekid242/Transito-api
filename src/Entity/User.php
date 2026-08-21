@@ -306,19 +306,31 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
             $roles[] = 'ROLE_' . $this->admin->getAdminRole(); // ex: ROLE_SUPER_ADMIN
         }
 
+        // 👈 NOUVEAU : dérive les rôles Symfony depuis l'entité Agent, sur le
+        // même principe que Admin ci-dessus. Avant ce correctif, aucun compte
+        // "agence" ne portait de rôle Symfony exploitable par un
+        // #[IsGranted(...)] — un admin_agence légitime se serait pris un 403
+        // sur n'importe quelle route protégée par ROLE_AGENCY_ADMIN, dont le
+        // futur PartnerSupportController.
+        //
+        // - agent_quai (embarquement) → ROLE_AGENT uniquement (pas d'accès
+        //   back-office).
+        // - admin_agence (back-office partenaire) → ROLE_AGENT +
+        //   ROLE_AGENCY_ADMIN.
+        // Seuls les agents au statut 'active' portent ces rôles, comme pour
+        // Admin ci-dessus (un agent désactivé perd son accès immédiatement).
+        if ($this->agent && $this->agent->getStatus() === 'active') {
+            $roles[] = 'ROLE_AGENT';
+            if ($this->agent->getAgentRole() === 'admin_agence') {
+                $roles[] = 'ROLE_AGENCY_ADMIN';
+            } else {
+                $roles[] = 'ROLE_AGENT_QUAI';
+            }
+        }
+
         $roles[] = 'ROLE_USER';
         return array_unique($roles);
     }
-
-    // /**
-    //  * @see UserInterface
-    //  */
-    // public function getRoles(): array
-    // {
-    //     $roles = $this->roles;
-    //     $roles[] = 'ROLE_USER';
-    //     return array_unique($roles);
-    // }
 
     public function setRoles(array $roles): static
     {

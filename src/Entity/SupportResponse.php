@@ -31,6 +31,10 @@ class SupportResponse
     #[ORM\Column(type: 'text')]
     private ?string $message = null;
 
+    #[ORM\Column(type: 'string', length: 20, options: ['default' => 'client'])]
+    private string $channel = 'client';
+
+
     #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE)]
     private ?\DateTimeInterface $createdAt = null;
 
@@ -85,6 +89,18 @@ class SupportResponse
     public function setMessage(string $message): static
     {
         $this->message = $message;
+        return $this;
+    }
+
+
+    public function getChannel(): string
+    {
+        return $this->channel;
+    }
+
+    public function setChannel(string $channel): static
+    {
+        $this->channel = $channel;
         return $this;
     }
 

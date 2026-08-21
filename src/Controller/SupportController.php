@@ -5,6 +5,7 @@ namespace App\Controller;
 use App\Entity\Notification;
 use App\Entity\SupportResponse;
 use App\Entity\SupportTicket;
+use App\Repository\AgentRepository;
 use App\Repository\UserRepository;
 use App\Repository\ReservationRepository;
 use App\Repository\TripRepository;
@@ -28,7 +29,11 @@ class SupportController extends AbstractController
         private UserRepository $user_repository,
         private ReservationRepository $reservationRepository,
         private TripRepository $tripRepository,
-        private AgencyRepository $agencyRepository
+        private AgencyRepository $agencyRepository,
+        // 👈 NOUVEAU : nécessaire pour retrouver les comptes admin_agence
+        // d'une agence donnée et les notifier des nouveaux tickets qui la
+        // concernent (voir notifyAgencyPartners() plus bas).
+        private AgentRepository $agentRepository
     ) {}
 
     #[Route('/api/support', name: 'create_support', methods: ['POST'])]
@@ -107,11 +112,7 @@ class SupportController extends AbstractController
             $this->notificationBroadcaster->broadcast($notification);
         }
 
-        // 👈 NOUVEAU : jusqu'ici, seul le client était notifié — aucun admin
-        // n'était informé qu'un nouveau ticket venait d'arriver. Résultat :
-        // un ticket pouvait rester sans réponse indéfiniment, personne côté
-        // support n'étant alerté en dehors d'un rafraîchissement manuel de
-        // la liste.
+        // Notifie les admins de la plateforme, comme avant.
         $this->adminNotifier->notifyAdmins(
             'Nouveau ticket de support',
             sprintf(
@@ -129,7 +130,56 @@ class SupportController extends AbstractController
             ['ticketId' => $ticket->getId()]
         );
 
+        // 👈 NOUVEAU : si le ticket est rattaché à une agence (via
+        // reservationId/tripId/agencyId ci-dessus), notifie aussi les
+        // admin_agence de cette agence. Sans ça, PartnerSupportController a
+        // beau scoper correctement les tickets par agence, un partenaire ne
+        // découvrirait un nouveau ticket qui le concerne qu'en rafraîchissant
+        // sa liste manuellement — le même problème que celui déjà corrigé
+        // côté admin plus haut.
+        $this->notifyAgencyPartners($ticket);
+
         return new JsonResponse(['id' => $ticket->getId()], 201);
+    }
+
+    /**
+     * Notifie tous les comptes admin_agence actifs de l'agence rattachée au
+     * ticket, s'il y en a une. Ne fait rien pour un ticket sans agence
+     * (catégorie générale, non lié à un voyage/réservation précis).
+     */
+    private function notifyAgencyPartners(SupportTicket $ticket): void
+    {
+        $agency = $ticket->getAgency();
+        if (!$agency) {
+            return;
+        }
+
+        $partnerAgents = $this->agentRepository->findBy([
+            'agency' => $agency,
+            'agentRole' => 'admin_agence',
+            'status' => 'active',
+        ]);
+
+        foreach ($partnerAgents as $agent) {
+            $recipient = $agent->getUser();
+            if (!$recipient) {
+                continue;
+            }
+
+            $notification = new Notification();
+            $notification->setRecipientType('user')
+                ->setRecipientId($recipient->getId())
+                ->setTitle('Nouveau ticket de support')
+                ->setContent(sprintf(
+                    '%s a ouvert un ticket concernant votre agence : « %s »',
+                    $ticket->getUser()?->getFullName() ?? 'Un client',
+                    $ticket->getSubject(),
+                ))
+                ->setCategory('SUPPORT');
+            $this->em->persist($notification);
+            $this->em->flush();
+            $this->notificationBroadcaster->broadcast($notification);
+        }
     }
 
     #[Route('/api/support/my-tickets', name: 'my_support', methods: ['GET'])]
@@ -157,20 +207,6 @@ class SupportController extends AbstractController
         return new JsonResponse(['data' => $out, 'count' => count($out)], 200);
     }
 
-    /**
-     * 👈 CORRIGÉ : cette route servait aussi bien à un admin qui répond au
-     * client qu'à un client qui relance son propre ticket, mais notifiait
-     * TOUJOURS le client (donc parfois de son propre message) et JAMAIS les
-     * admins quand c'est le client qui relance.
-     *
-     * ⚠️ Le code ci-dessous suppose que `SupportResponse` expose l'auteur via
-     * `getAuthor()` (retournant un `User`). Si ta méthode s'appelle
-     * différemment (`getUser()`, `getCreatedBy()`...), adapte
-     * `resolveResponseAuthorId()` en conséquence. Si aucune méthode de ce
-     * type n'existe encore sur l'entité, il faut l'ajouter pour distinguer
-     * "réponse de l'admin" vs "relance du client" — sans ça, ce contrôleur
-     * ne peut pas savoir qui a écrit le message.
-     */
     #[Route('/api/support/{id}', name: 'support_detail', requirements: ['id' => '\d+'], methods: ['GET'])]
     public function detail(int $id): JsonResponse
     {
@@ -178,10 +214,9 @@ class SupportController extends AbstractController
         if (!$ticket) {
             return new JsonResponse(['error' => 'Not found'], 404);
         }
-        
+
         /** @var \App\Entity\User|null $currentUser */
         $currentUser = $this->getUser();
-
         if (!$currentUser) {
             return new JsonResponse(['error' => 'Authentication required'], 401);
         }
@@ -194,6 +229,13 @@ class SupportController extends AbstractController
 
         $responses = [];
         foreach ($ticket->getResponses() as $response) {
+            // 👈 NOUVEAU : un ticket peut aussi contenir des échanges
+            // internes agence <-> admin (channel = 'agency', voir
+            // PartnerSupportController). Le client ne doit jamais les voir :
+            // on ne lui montre que son propre fil (channel = 'client').
+            if ($response->getChannel() !== 'client') {
+                continue;
+            }
             $author = $response->getAuthor();
             $responses[] = [
                 'id' => $response->getId(),
@@ -257,8 +299,10 @@ class SupportController extends AbstractController
         $resp->setTicket($ticket);
         $resp->setAuthor($currentUser);
         $resp->setMessage($message);
+        // Ce endpoint ne sert qu'au fil client <-> admin (l'agence répond
+        // via PartnerSupportController::addResponse(), channel = 'agency').
+        $resp->setChannel('client');
 
-        $authorId = $currentUser->getId();
         $isFromTicketOwner = $isOwner;
 
         $notification = null;
@@ -288,25 +332,23 @@ class SupportController extends AbstractController
         }
 
         if ($isFromTicketOwner) {
-            // 👈 NOUVEAU : le client a relancé son propre ticket → ce sont
-            // les admins qu'il faut prévenir, pas le client lui-même.
+            // Le client a relancé son propre ticket → ce sont les admins
+            // qu'il faut prévenir, pas le client lui-même.
             $this->adminNotifier->notifyAdmins(
                 'Relance sur un ticket de support',
                 sprintf('%s a répondu sur le ticket « %s ».', $ticket->getUser()?->getFullName() ?? 'Un client', $ticket->getSubject()),
                 'SUPPORT',
                 ['ticketId' => $ticket->getId()],
             );
+            // 👈 NOUVEAU : si le ticket est rattaché à une agence, la relance
+            // du client doit aussi remonter au partenaire, exactement comme
+            // pour la création du ticket (notifyAgencyPartners réutilisée).
+            $this->notifyAgencyPartners($ticket);
         }
 
         return new JsonResponse(['id' => $resp->getId()], 201);
     }
 
-    /**
-     * Tente de déterminer l'auteur de la réponse. Retourne null si
-     * l'information n'est pas disponible (voir note ci-dessus) — dans ce
-     * cas $isFromTicketOwner sera toujours false et le comportement reste
-     * celui d'avant (notifie le client à chaque réponse).
-     */
     #[Route('/api/support/{id}/close', name: 'support_close', requirements: ['id' => '\d+'], methods: ['POST'])]
     public function close(int $id, Request $request): JsonResponse
     {
@@ -343,24 +385,5 @@ class SupportController extends AbstractController
         $ticket->setStatus('open')->setClosedReason(null)->touch();
         $this->em->flush();
         return new JsonResponse(['message' => 'Ticket reopened', 'id' => $ticket->getId(), 'status' => $ticket->getStatus()], 200);
-    }
-
-    private function resolveResponseAuthorId(SupportResponse $resp, Request $request): ?int
-    {
-        if (method_exists($resp, 'getAuthor') && $resp->getAuthor()) {
-            return $resp->getAuthor()->getId();
-        }
-        if (method_exists($resp, 'getUser') && $resp->getUser()) {
-            return $resp->getUser()->getId();
-        }
-        // Fallback : si l'appelant authentifié courant est un client (pas un
-        // admin/agent), on considère que c'est lui l'auteur.
-        /** @var User */
-        $currentUser = $this->getUser();
-        if ($currentUser && !$this->isGranted('ROLE_ADMIN') && !$this->isGranted('ROLE_AGENT')) {
-            // $user = $this->user_repository->findOneBy([])
-            return $currentUser->getId();
-        }
-        return null;
     }
 }
