@@ -76,7 +76,7 @@ class AuthController extends AbstractController
         if ($agent && $agent->getStatus() !== 'actif') {
             return $this->json(['message' => 'Compte agent inactif. Contactez l’administrateur de votre agence.'], Response::HTTP_FORBIDDEN);
         }
-        if ($agent && $agent->getAgency()?->getStatus() !== 'actif') {
+        if ($agent && $agent->getAgency()?->getStatus() !== 'active') {
             return $this->json(['message' => 'Cette agence est actuellement inactive.'], Response::HTTP_FORBIDDEN);
         }
 
