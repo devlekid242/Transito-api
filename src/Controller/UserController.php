@@ -239,7 +239,7 @@ class UserController extends AbstractController
             'quartier' => $agent->getUser()->getQuartier(),
             // 'roles' => $agent->getUser()->getRoles(),
             'agentRole' => $agent->getAgentRole(),
-            'status' => $agent->getStatus(),
+            'statut' => $agent->getStatus(),
             'created_at' => $agent->getUser()->getCreatedAt()?->format(\DateTimeInterface::ATOM),
         ];
 
@@ -495,7 +495,7 @@ class UserController extends AbstractController
             'ville' => $targetUser->getVilleResidence(),
             'quartier' => $targetUser->getQuartier(),
             'agentRole' => $agent->getAgentRole(),
-            'statut' => $agent->getStatus(),
+            'status' => $agent->getStatus(),
             'agencyId' => $agent->getAgency()?->getId(),
         ]);
     }
