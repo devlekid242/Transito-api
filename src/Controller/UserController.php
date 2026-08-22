@@ -235,7 +235,7 @@ class UserController extends AbstractController
             'fullName' => $agent->getUser()->getFullName(),
             'email' => $agent->getUser()->getEmail(),
             'phoneNumber' => $agent->getUser()->getPhoneNumber(),
-            'villeResidence' => $agent->getUser()->getVilleResidence(),
+            'ville' => $agent->getUser()->getVilleResidence(),
             'quartier' => $agent->getUser()->getQuartier(),
             // 'roles' => $agent->getUser()->getRoles(),
             'agentRole' => $agent->getAgentRole(),
@@ -394,6 +394,110 @@ class UserController extends AbstractController
         }
 
         return $this->json($res, Response::HTTP_CREATED);
+    }
+
+    #[Route('/api/users/staff/{id}', name: 'api_users_update_staff', requirements: ['id' => '\d+'], methods: ['PUT'])]
+    public function updateStaffUser(
+        int $id,
+        Request $request,
+        EntityManagerInterface $em,
+        UserPasswordHasherInterface $passwordHasher,
+        AgentRepository $agentRepo,
+    ): JsonResponse {
+        if (!$this->isGranted('ROLE_PARTNER')) {
+            return $this->json(['message' => 'Accès refusé.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $agency = $this->getAuthenticatedAgency($agentRepo);
+        if (!$agency) {
+            return $this->json(['message' => 'Aucune agence associée à l\'utilisateur authentifié.'], Response::HTTP_FORBIDDEN);
+        }
+
+        // On ne peut modifier qu'un agent de sa propre agence
+        $agent = $agentRepo->findOneBy(['user' => $id, 'agency' => $agency]);
+        if (!$agent) {
+            return $this->json(['message' => 'Agent introuvable pour cette agence.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+        if (!is_array($payload)) {
+            return $this->json(['message' => 'Payload JSON invalide.'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $targetUser = $agent->getUser();
+
+        foreach (['fullName' => true, 'phoneNumber' => true, 'ville' => true, 'quartier' => true] as $field => $required) {
+            if (array_key_exists($field, $payload) && trim((string) $payload[$field]) === '') {
+                return $this->json(['message' => "Le champ \"{$field}\" ne peut pas être vide."], Response::HTTP_BAD_REQUEST);
+            }
+        }
+
+        // Unicité téléphone (hors utilisateur courant)
+        if (array_key_exists('phoneNumber', $payload)) {
+            $phoneNumber = trim((string) $payload['phoneNumber']);
+            if ($phoneNumber !== $targetUser->getPhoneNumber()) {
+                $existing = $em->getRepository(User::class)->findOneBy(['phoneNumber' => $phoneNumber]);
+                if ($existing && $existing->getId() !== $targetUser->getId()) {
+                    return $this->json(['message' => 'Un utilisateur avec ce numéro existe déjà.'], Response::HTTP_CONFLICT);
+                }
+            }
+            $targetUser->setPhoneNumber($phoneNumber);
+        }
+
+        // Unicité email (hors utilisateur courant)
+        if (array_key_exists('email', $payload)) {
+            $email = $payload['email'] !== null ? trim((string) $payload['email']) : null;
+            $email = $email === '' ? null : $email;
+            if ($email !== null && $email !== $targetUser->getEmail()) {
+                $existingEmail = $em->getRepository(User::class)->findOneBy(['email' => $email]);
+                if ($existingEmail && $existingEmail->getId() !== $targetUser->getId()) {
+                    return $this->json(['message' => 'Un utilisateur avec cet email existe déjà.'], Response::HTTP_CONFLICT);
+                }
+            }
+            $targetUser->setEmail($email);
+        }
+
+        if (array_key_exists('fullName', $payload)) {
+            $targetUser->setFullName(trim((string) $payload['fullName']));
+        }
+        if (array_key_exists('ville', $payload)) {
+            $targetUser->setVilleResidence(trim((string) $payload['ville']));
+        }
+        if (array_key_exists('quartier', $payload)) {
+            $targetUser->setQuartier(trim((string) $payload['quartier']));
+        }
+        if (!empty($payload['password'])) {
+            $targetUser->setPassword($passwordHasher->hashPassword($targetUser, (string) $payload['password']));
+        }
+
+        // ⚠️ Volontairement : on ignore un éventuel `agencyId` dans le payload.
+        // Le front en envoie un (issu de getAgencies(), qui liste TOUTES les agences),
+        // mais l'accepter permettrait à un partenaire de transférer un agent vers
+        // l'agence d'un autre partenaire. createStaff() a le même comportement
+        // (l'agence vient toujours de getAuthenticatedAgency(), jamais du payload).
+        $agentData = $payload['agent'] ?? [];
+        if (!empty($agentData['agentRole'])) {
+            $agent->setAgentRole($agentData['agentRole']);
+        }
+        if (!empty($agentData['status'])) {
+            $agent->setStatus($agentData['status']);
+        }
+
+        $em->persist($targetUser);
+        $em->persist($agent);
+        $em->flush();
+
+        return $this->json([
+            'id' => $targetUser->getId(),
+            'fullName' => $targetUser->getFullName(),
+            'email' => $targetUser->getEmail(),
+            'phoneNumber' => $targetUser->getPhoneNumber(),
+            'ville' => $targetUser->getVilleResidence(),
+            'quartier' => $targetUser->getQuartier(),
+            'agentRole' => $agent->getAgentRole(),
+            'status' => $agent->getStatus(),
+            'agencyId' => $agent->getAgency()?->getId(),
+        ]);
     }
 
     private function serializeUser(User $user): array
