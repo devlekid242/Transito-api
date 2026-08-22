@@ -495,7 +495,7 @@ class UserController extends AbstractController
             'ville' => $targetUser->getVilleResidence(),
             'quartier' => $targetUser->getQuartier(),
             'agentRole' => $agent->getAgentRole(),
-            'status' => $agent->getStatus(),
+            'statut' => $agent->getStatus(),
             'agencyId' => $agent->getAgency()?->getId(),
         ]);
     }
