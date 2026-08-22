@@ -334,7 +334,7 @@ class UserController extends AbstractController
             $agent->setUser($user);
             $agent->setAgency($agency);
             $agent->setAgentRole($payload['agentRole'] ?? 'agent_quai'); // 👈 corrigé : $payload, pas $agentData
-            $agent->setStatus('active');
+            $agent->setStatus('actif');
             $em->persist($agent);
         }
 
