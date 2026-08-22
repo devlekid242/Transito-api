@@ -212,6 +212,40 @@ class UserController extends AbstractController
         return $this->json($staffUsers);
     }
 
+    #[Route('/api/users/staff/{id}', name: 'api_users_get_staff_by_id', requirements: ['id' => '\d+'], methods: ['GET'])]
+    public function getStaffUserById(int $id): JsonResponse
+    {
+        $user = $this->getUser();
+        if (!$user instanceof User) {
+            return $this->json(['message' => 'Non autorisé.'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $agency = $this->getAuthenticatedAgency($this->agentRepository);
+        if (!$agency) {
+            return $this->json(['message' => 'Aucune agence associée à l\'utilisateur authentifié.'], Response::HTTP_FORBIDDEN);
+        }
+
+        $agent = $this->agentRepository->findOneBy(['user' => $id, 'agency' => $agency]);
+        if (!$agent) {
+            return $this->json(['message' => 'Agent introuvable pour cette agence.'], Response::HTTP_NOT_FOUND);
+        }
+
+        $staffUser = [
+            'id' => $agent->getUser()->getId(),
+            'fullName' => $agent->getUser()->getFullName(),
+            'email' => $agent->getUser()->getEmail(),
+            'phoneNumber' => $agent->getUser()->getPhoneNumber(),
+            'villeResidence' => $agent->getUser()->getVilleResidence(),
+            'quartier' => $agent->getUser()->getQuartier(),
+            // 'roles' => $agent->getUser()->getRoles(),
+            'agentRole' => $agent->getAgentRole(),
+            'status' => $agent->getStatus(),
+            'created_at' => $agent->getUser()->getCreatedAt()?->format(\DateTimeInterface::ATOM),
+        ];
+
+        return $this->json($staffUser);
+    }
+
     /**
      * 👈 CORRIGÉ : deux bugs bloquants ici avant.
      *
