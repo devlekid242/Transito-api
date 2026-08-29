@@ -69,6 +69,8 @@ class TripController extends AbstractController
             if (!in_array('ROLE_PARTNER', $user->getRoles())) {
                 $qb->andWhere('t.departureTime >= :now')
                     ->setParameter('now', new \DateTime());
+                $qb->andWhere('t.departureTimeOfDay >= :now')
+                    ->setParameter('now', new \DateTime());
             }
         }
 
@@ -131,13 +133,17 @@ class TripController extends AbstractController
 
     public function uncoming(Request $request): JsonResponse
     {
+        $now = new \DateTime();
+
         $qb = $this->tripRepository->createQueryBuilder('t')
-            ->join('t.agency', 'a')
-            ->join('t.bus', 'b')
-            ->where('t.status = :status')
-            ->setParameter('status', 'planifie')
+            ->leftJoin('t.agency', 'a')
+            ->addSelect('a')
+            ->leftJoin('t.bus', 'b')
+            ->addSelect('b')
+            ->where('t.status IN (:statuses)')
+            ->setParameter('statuses', ['planifie', 'embarquement'])
             ->andWhere('t.departureTime >= :now')
-            ->setParameter('now', new \DateTime())
+            ->setParameter('now', $now)
             ->orderBy('t.departureTime', 'ASC');
 
         $trips = $qb->getQuery()->getResult();

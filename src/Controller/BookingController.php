@@ -116,7 +116,7 @@ class BookingController extends AbstractController
             }
 
             // --- Règles métier appliquées par les agences de transport ---
-            if ($trip->getStatus() !== 'planifie') {
+            if (!in_array($trip->getStatus(), ['planifie', 'embarquement'], true)) {
                 $connection->rollBack();
                 return new JsonResponse(['error' => 'Ce voyage n\'est plus disponible à la réservation.'], 422);
             }

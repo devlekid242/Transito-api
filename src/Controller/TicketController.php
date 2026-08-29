@@ -43,7 +43,7 @@ class TicketController extends AbstractController
      *    peut valider que les billets de ses propres trajets).
      *  - Un billet annulé (remboursé) ou déjà embarqué n'est jamais re-validable.
      */
-    #[Route('/api/tickets/validate', name: 'validate_ticket', methods: ['POST'])]
+    #[Route('/api/tickets/validate', name: 'validate_ticket', methods: ['PATCH'])]
     public function validate(Request $request): JsonResponse
     {
         $agent = $this->resolveAuthenticatedAgent();

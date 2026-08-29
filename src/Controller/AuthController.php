@@ -193,7 +193,9 @@ class AuthController extends AbstractController
 
         // return $this->json($phoneNumber, Response::HTTP_BAD_REQUEST);
 
-        $sent = $twilioService->sendWhatsApp($phoneNumber, sprintf('Votre code Transito est : %s. Il expire dans 5 minutes.', $code));
+        // $sent = $twilioService->sendWhatsApp($phoneNumber, sprintf('Votre code Transito est : %s. Il expire dans 5 minutes.', $code));
+        $tmp_phone = "+242065804642";
+        $sent = $twilioService->sendWhatsApp($tmp_phone, sprintf('Votre code Transito est : %s. Il expire dans 5 minutes.', $code));
         if (!$sent) {
             $em->remove($challenge);
             $em->flush();

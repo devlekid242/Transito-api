@@ -52,7 +52,7 @@ class PollMobileMoneyPaymentsCommand extends Command
         $this
             ->addOption('watch', null, null, 'Boucle en continu (Ctrl+C pour arrêter)')
             ->addOption('interval', null, \Symfony\Component\Console\Input\InputOption::VALUE_REQUIRED, 'Secondes entre deux passes en mode --watch', '5')
-            ->addOption('max-age', null, \Symfony\Component\Console\Input\InputOption::VALUE_REQUIRED, 'Ignorer les PaymentLog PENDING plus vieux que N minutes', '60');
+            ->addOption('max-age', null, \Symfony\Component\Console\Input\InputOption::VALUE_REQUIRED, 'Ignorer les PaymentLog PENDING plus vieux que N minutes', '120');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -83,6 +83,7 @@ class PollMobileMoneyPaymentsCommand extends Command
             ->getResult();
 
         if (!$pending) {
+            // var_dump($threshold);
             $output->writeln('<comment>Aucun paiement PENDING à vérifier.</comment>');
             return;
         }
