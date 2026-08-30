@@ -305,9 +305,15 @@ class WalletService
         $wallet->touch();
 
         // 4. Ledger Transaction
+        // Type comptable = DEBIT : ce mouvement représente un débit du Solde
+        // Bloqué de l'agence (même si sa contrepartie crédite le Solde
+        // Disponible). C'est la même convention que TICKET_NO_SHOW,
+        // WITHDRAWAL_HOLD et REFUND. Un CREDIT ici cassait la réconciliation
+        // (transito:finance:reconcile) qui attend systématiquement DEBIT
+        // pour cette source.
         $tx = new WalletTransaction();
         $tx->setWallet($wallet);
-        $tx->setType(WalletTransaction::TYPE_CREDIT);
+        $tx->setType(WalletTransaction::TYPE_DEBIT);
         $tx->setSource(WalletTransaction::SOURCE_TICKET_BOARDED);
         $tx->setAmount($ticketNetAmount);
         $this->snapshotTransaction($tx, $wallet);

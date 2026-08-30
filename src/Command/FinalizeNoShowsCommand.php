@@ -5,6 +5,7 @@ namespace App\Command;
 use App\Entity\Notification;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
+use App\Service\AuditLogger;
 use App\Service\DomainStateTransitionService;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
@@ -28,6 +29,7 @@ final class FinalizeNoShowsCommand extends Command
         private WalletService $walletService,
         private NotificationBroadcastService $broadcaster,
         private DomainStateTransitionService $stateTransitions,
+        private AuditLogger $auditLogger,
         #[Autowire('%env(int:TRIP_NO_SHOW_GRACE_MINUTES)%')]
         private int $noShowGraceMinutes = 30,
     ) {
@@ -63,6 +65,7 @@ final class FinalizeNoShowsCommand extends Command
 
         $count = 0;
         foreach ($tickets as $ticket) {
+            $notification = null;
             $connection = $this->em->getConnection();
             $connection->beginTransaction();
             try {
@@ -72,11 +75,43 @@ final class FinalizeNoShowsCommand extends Command
                     continue;
                 }
 
-                $locked->setStatus('no_show');
+                $previousStatus = $locked->getStatus();
+                $this->stateTransitions->transitionTicket($locked, 'no_show');
                 $locked->setQrCodeToken(null);
                 $reservation = $locked->getReservation();
 
-                $this->walletService->processTicketNoShow($locked);
+                // Ne jamais laisser un billet passer en no_show sans
+                // contrepartie financière : si aucune transaction
+                // RESERVATION_PAYMENT n'existe pour cette réservation,
+                // processTicketNoShow() renvoie null silencieusement. Sans
+                // ce contrôle, le billet serait quand même finalisé et les
+                // fonds resteraient bloqués indéfiniment, sans jamais être
+                // libérés ni reversés à la plateforme — une anomalie que
+                // seul un audit ultérieur (FinancialWorkflowAuditService)
+                // aurait fini par détecter, bien après coup.
+                $noShowTx = $this->walletService->processTicketNoShow($locked);
+                if ($noShowTx === null) {
+                    throw new \RuntimeException(sprintf(
+                        'Billet #%d : aucune transaction RESERVATION_PAYMENT trouvée pour la réservation #%d, impossible de finaliser financièrement ce no-show.',
+                        $locked->getId(),
+                        $reservation?->getId() ?? 0
+                    ));
+                }
+
+                $this->auditLogger->record(
+                    'TICKET_NO_SHOW',
+                    'Ticket',
+                    (string) $locked->getId(),
+                    ['status' => $previousStatus],
+                    ['status' => $locked->getStatus()],
+                    [
+                        'source' => 'trips.finalize-no-shows',
+                        'reservationId' => $reservation?->getId(),
+                        'tripId' => $reservation?->getTrip()?->getId(),
+                        'settlementAmount' => $locked->getSettlementAmount(),
+                        'walletTransactionId' => $noShowTx->getId(),
+                    ]
+                );
 
                 if ($reservation) {
                     $all = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation]);
@@ -103,7 +138,7 @@ final class FinalizeNoShowsCommand extends Command
                 $this->em->flush();
                 $connection->commit();
 
-                if (isset($notification) && $reservation?->getUser()) {
+                if ($notification !== null && $reservation?->getUser()) {
                     $this->broadcaster->broadcast($notification);
                 }
                 $count++;
