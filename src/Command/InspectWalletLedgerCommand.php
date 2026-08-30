@@ -75,8 +75,7 @@ final class InspectWalletLedgerCommand extends Command
         $rows = $this->em->getRepository(WalletTransaction::class)->createQueryBuilder('wt')
             ->andWhere('wt.wallet = :wallet')
             ->setParameter('wallet', $wallet)
-            ->orderBy('wt.createdAt', 'ASC')
-            ->addOrderBy('wt.id', 'ASC')
+            ->orderBy('wt.id', 'ASC')
             ->getQuery()
             ->getResult();
 

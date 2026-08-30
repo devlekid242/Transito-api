@@ -30,9 +30,11 @@ final class FinancialReconciliationService
         $globalDiscrepancies = [];
 
         foreach ($wallets as $wallet) {
+            // Idem : la dernière transaction est celle avec le plus grand id,
+            // pas la plus récente selon createdAt (voir note plus bas).
             $latest = $this->walletTransactionRepository->findOneBy(
                 ['wallet' => $wallet],
-                ['createdAt' => 'DESC', 'id' => 'DESC']
+                ['id' => 'DESC']
             );
 
             $available = $wallet->getAvailableBalance();
@@ -43,14 +45,21 @@ final class FinancialReconciliationService
 
             // Contrôle de continuité : pour chaque source connue, le delta entre
             // deux snapshots doit correspondre exactement au mouvement attendu.
+            // Tri par id, pas par createdAt : l'id auto-incrémenté reflète
+            // toujours l'ordre réel d'insertion en base, contrairement à
+            // createdAt qui dépend de l'horloge/fuseau horaire du serveur au
+            // moment de l'écriture. Un changement de fuseau horaire entre
+            // deux transactions (ex: Europe/Paris -> Africa/Brazzaville en
+            // cours de test) peut faire apparaître des createdAt dans le
+            // désordre alors que l'ordre réel des mouvements est correct —
+            // ce qui provoquait de faux positifs sur ce contrôle.
             $snapshotRows = $this->walletTransactionRepository->createQueryBuilder('wt')
                 ->andWhere('wt.wallet = :wallet')
                 ->andWhere('wt.availableAfter IS NOT NULL')
                 ->andWhere('wt.blockedAfter IS NOT NULL')
                 ->andWhere('wt.reservedAfter IS NOT NULL')
                 ->setParameter('wallet', $wallet)
-                ->orderBy('wt.createdAt', 'ASC')
-                ->addOrderBy('wt.id', 'ASC')
+                ->orderBy('wt.id', 'ASC')
                 ->getQuery()
                 ->getResult();
 

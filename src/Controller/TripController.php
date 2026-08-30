@@ -44,6 +44,8 @@ class TripController extends AbstractController
         $departureDate = $request->query->get('departure_date') ?? null;
         $category = $request->query->get('category') ?? null;
         $maxPrice = $request->query->get('max_price') ?? null;
+        $status = $request->query->get('status') ?? null;
+        $search = trim((string)($request->query->get('search') ?? ''));
         $page = max(1, (int)$request->query->get('page', 1));
         $limit = max(1, (int)$request->query->get('limit', 10));
 
@@ -90,6 +92,34 @@ class TripController extends AbstractController
                 ->setParameter('arrivalCity', '%' . mb_strtolower($arrivalCity) . '%');
         }
 
+        if ($search !== '') {
+            $qb->andWhere(
+                'LOWER(t.departureCity) LIKE :search '
+                . 'OR LOWER(t.arrivalCity) LIKE :search '
+                . 'OR LOWER(dp.city) LIKE :search '
+                . 'OR LOWER(ap.city) LIKE :search '
+                . 'OR LOWER(COALESCE(t.busNumber, b.registrationNumber)) LIKE :search'
+            )
+                ->setParameter('search', '%' . mb_strtolower($search) . '%');
+        }
+
+        if ($status) {
+            $allowedStatuses = ['planifie', 'embarquement', 'en_route', 'termine', 'annule'];
+            $normalizedStatus = strtolower(trim((string)$status));
+
+            if ($normalizedStatus === 'scheduled') {
+                $normalizedStatus = 'planifie';
+            } elseif ($normalizedStatus === 'active') {
+                $normalizedStatus = 'en_route';
+            } elseif ($normalizedStatus === 'completed') {
+                $normalizedStatus = 'termine';
+            }
+
+            if (in_array($normalizedStatus, $allowedStatuses, true)) {
+                $qb->andWhere('t.status = :status')
+                    ->setParameter('status', $normalizedStatus);
+            }
+        }
 
         if ($departureDate) {
             try {
