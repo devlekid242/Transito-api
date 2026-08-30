@@ -5,6 +5,8 @@ namespace App\Service;
 use App\Entity\Notification;
 use App\Repository\DeviceTokenRepository;
 use Kreait\Firebase\Contract\Messaging;
+use Kreait\Firebase\Messaging\AndroidConfig;
+use Kreait\Firebase\Messaging\ApnsConfig;
 use Kreait\Firebase\Messaging\CloudMessage;
 use Kreait\Firebase\Messaging\MessageTarget;
 use Kreait\Firebase\Messaging\Notification as FcmNotification;
@@ -28,15 +30,6 @@ class FcmPushService
     /**
      * Point d'entrée unique : construit le message à partir de l'entité
      * Notification et le route vers le ou les bons appareils.
-     *
-     * 👈 CORRIGÉ : `agency_all` envoyait un push FCM à TOUS les devices
-     * connus, tout utilisateur/agence confondus (`sendToAllDevices`).
-     * Concrètement, une alerte interne pour l'agence A finissait aussi
-     * dans la poche de chaque client et chaque agent de l'agence B.
-     * Désormais on cible les devices de l'agence concernée quand un
-     * agencyId (recipientId) est fourni, et on réserve la diffusion à
-     * TOUS les devices au cas explicite où recipientId est null (annonce
-     * vraiment globale, déjà restreinte aux admins côté NotificationController).
      */
     public function sendForNotification(Notification $notification): void
     {
@@ -62,44 +55,24 @@ class FcmPushService
         }
     }
 
-    public function sendToUserId(int $userId, string $title, string $body, array $data = []): void
+    public function sendToUserId(int $userId, string $title, string $body, array $data = []): array
     {
         $tokens = array_map(
             fn($d) => $d->getToken(),
             $this->deviceTokenRepository->findBy(['user' => $userId]),
         );
 
-        $this->sendToTokens($tokens, $title, $body, $data);
+        return $this->sendToTokens($tokens, $title, $body, $data);
     }
 
-    /**
-     * 👈 NOUVEAU : envoie uniquement aux devices des utilisateurs rattachés
-     * à cette agence (agents/partenaires).
-     *
-     * ⚠️ Nécessite une méthode `findByAgencyId(int $agencyId): DeviceToken[]`
-     * sur `DeviceTokenRepository` (jointure DeviceToken → User → Agent →
-     * Agency). Elle n'était pas présente dans les fichiers fournis : adapte
-     * le nom si ta relation Doctrine diffère. Exemple d'implémentation :
-     *
-     * public function findByAgencyId(int $agencyId): array
-     * {
-     *     return $this->createQueryBuilder('dt')
-     *         ->innerJoin('dt.user', 'u')
-     *         ->innerJoin('u.agent', 'a')
-     *         ->andWhere('a.agency = :agencyId')
-     *         ->setParameter('agencyId', $agencyId)
-     *         ->getQuery()
-     *         ->getResult();
-     * }
-     */
-    private function sendToAgencyDevices(int $agencyId, string $title, string $body, array $data = []): void
+    private function sendToAgencyDevices(int $agencyId, string $title, string $body, array $data = []): array
     {
         if (!method_exists($this->deviceTokenRepository, 'findByAgencyId')) {
             $this->logger?->error(
                 'DeviceTokenRepository::findByAgencyId manquante — impossible de cibler le push FCM par agence.',
                 ['agencyId' => $agencyId],
             );
-            return;
+            return ['success' => 0, 'failure' => 0, 'stale' => 0];
         }
 
         $tokens = array_map(
@@ -107,47 +80,108 @@ class FcmPushService
             $this->deviceTokenRepository->findByAgencyId($agencyId),
         );
 
-        $this->sendToTokens($tokens, $title, $body, $data);
+        return $this->sendToTokens($tokens, $title, $body, $data);
     }
 
-    private function sendToAllDevices(string $title, string $body, array $data = []): void
+    private function sendToAllDevices(string $title, string $body, array $data = []): array
     {
         $tokens = array_map(fn($d) => $d->getToken(), $this->deviceTokenRepository->findAll());
-        $this->sendToTokens($tokens, $title, $body, $data);
+        return $this->sendToTokens($tokens, $title, $body, $data);
     }
 
-    private function sendToTokens(array $tokens, string $title, string $body, array $data = []): void
+    public function sendToTokens(array $tokens, string $title, string $body, array $data = []): array
     {
         $tokens = array_values(array_unique(array_filter($tokens)));
         if (empty($tokens)) {
-            return;
+            return ['success' => 0, 'failure' => 0, 'stale' => 0];
         }
+
+        $androidConfig = AndroidConfig::fromArray([
+            'priority' => 'high',
+            'notification' => [
+                'channel_id' => 'transito_notifications',
+                'sound' => 'default',
+                'default_sound' => true,
+                'notification_priority' => 'PRIORITY_HIGH',
+                'visibility' => 'PUBLIC',
+            ],
+        ]);
+
+        $apnsConfig = ApnsConfig::fromArray([
+            'headers' => [
+                'apns-priority' => '10',
+            ],
+            'payload' => [
+                'aps' => [
+                    'alert' => [
+                        'title' => $title,
+                        'body' => $body,
+                    ],
+                    'sound' => 'default',
+                    'badge' => 1,
+                    'content-available' => 1,
+                ],
+            ],
+        ]);
 
         $message = CloudMessage::new()
             ->withNotification(FcmNotification::create($title, $body))
-            ->withData($data);
+            ->withData($data)
+            ->withAndroidConfig($androidConfig)
+            ->withApnsConfig($apnsConfig);
 
         try {
             $report = $this->messaging->sendMulticast($message, $tokens);
         } catch (\Throwable $e) {
-            $this->logger?->error('Envoi FCM multicast échoué', ['error' => $e->getMessage()]);
-            return;
+            $this->logger?->error('Envoi FCM multicast échoué', [
+                'error' => $e->getMessage(),
+                'tokens_count' => count($tokens),
+            ]);
+            return ['success' => 0, 'failure' => count($tokens), 'error' => $e->getMessage()];
         }
 
         $staleTokens = [];
+        $failuresCount = 0;
+        $errors = [];
+        $successCount = $report->successes()->count();
+
         foreach ($report->failures()->getItems() as $failure) {
+            $failuresCount++;
             $target = $failure->target();
-            if ($target?->type() === MessageTarget::TOKEN) {
-                $staleTokens[] = $target->value();
+            $errorMessage = $failure->error()?->getMessage() ?? 'Erreur inconnue';
+            $tokenVal = $target?->value();
+            $errors[] = [
+                'token' => $tokenVal,
+                'error' => $errorMessage,
+            ];
+
+            // Ne supprimer QUE les tokens réellement désenregistrés / introuvables côté Firebase.
+            // Ne JAMAIS supprimer les tokens en cas d'erreur de clé, mismatch de projet ou réseau !
+            $isTrulyStale = stripos($errorMessage, 'UNREGISTERED') !== false
+                || stripos($errorMessage, 'NOT_FOUND') !== false
+                || stripos($errorMessage, 'registration-token-not-registered') !== false;
+
+            if ($target?->type() === MessageTarget::TOKEN && $isTrulyStale) {
+                $staleTokens[] = $tokenVal;
             }
-            $this->logger?->warning('Échec envoi push vers un token', [
-                'token' => $target?->value(),
-                'error' => $failure->error()->getMessage(),
+
+            $this->logger?->warning('Échec envoi push vers un token FCM', [
+                'token' => $tokenVal,
+                'error' => $errorMessage,
+                'isStale' => $isTrulyStale,
             ]);
         }
 
         if (!empty($staleTokens)) {
             $this->deviceTokenRepository->deleteByTokens($staleTokens);
+            $this->logger?->info('Tokens FCM périmés nettoyés', ['count' => count($staleTokens)]);
         }
+
+        return [
+            'success' => $successCount,
+            'failure' => $failuresCount,
+            'stale' => count($staleTokens),
+            'errors' => $errors,
+        ];
     }
 }

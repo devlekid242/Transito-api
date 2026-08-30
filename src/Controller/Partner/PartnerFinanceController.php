@@ -124,7 +124,7 @@ class PartnerFinanceController extends AbstractController
                 ->where('pl.reservation IN (:ids)')
                 ->andWhere('pl.status IN (:statuses)')
                 ->setParameter('ids', $reservationIds)
-                ->setParameter('statuses', ['REFUND_PENDING', 'REFUNDED'])
+                ->setParameter('statuses', ['REFUND_PENDING', 'REFUNDED', 'REFUNDED_COMPLETED'])
                 ->getQuery()
                 ->getArrayResult();
             foreach ($refundLogs as $row) {
@@ -149,7 +149,7 @@ class PartnerFinanceController extends AbstractController
             'annuleesRembourseesConfirmees' => 0,  // annulées, remboursement déjà versé par l'admin
             'annuleesSansPaiementPrealable' => 0,  // annulées mais aucun paiement n'avait été effectué
         ];
-
+        
         foreach ($reservations as $reservation) {
             $status = $reservation->getPaymentStatus();
             $id = $reservation->getId();
@@ -171,9 +171,12 @@ class PartnerFinanceController extends AbstractController
 
                 case 'rembourse':
                     $refundStatus = $refundStatusByReservation[$id] ?? null;
+                    
                     if ($refundStatus === 'REFUND_PENDING') {
                         $reservationsByStatus['annuleesRemboursementEnAttente']++;
-                    } elseif ($refundStatus === 'REFUNDED') {
+                    } elseif ($refundStatus === 'REFUNDED' ) {
+                        $reservationsByStatus['annuleesRembourseesConfirmees']++;
+                    } elseif ($refundStatus === 'REFUNDED_COMPLETED') {
                         $reservationsByStatus['annuleesRembourseesConfirmees']++;
                     } else {
                         // Annulée sans qu'aucun paiement n'ait été confirmé au préalable
@@ -290,6 +293,7 @@ class PartnerFinanceController extends AbstractController
                 'id' => $tx->getId(),
                 'description' => $tx->getDescription(),
                 'amount' => $signedAmount,
+                'type' => $tx->getType(),
                 'status' => $status,
                 'reservationId' => $tx->getReservation()?->getId(),
                 'withdrawalId' => $tx->getWithdrawalRequest()?->getId(),
