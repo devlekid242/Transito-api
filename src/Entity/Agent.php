@@ -107,7 +107,7 @@ class Agent
      */
     public function canValidateTickets(): bool
     {
-        return $this->status === 'actif' && in_array($this->agentRole, ['agent_quai', 'admin_agence'], true);
+        return $this->status === 'active' && in_array($this->agentRole, ['agent_quai', 'admin_agence'], true);
     }
 
     public function setStatus(string $status): static
