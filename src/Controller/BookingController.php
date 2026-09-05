@@ -12,6 +12,7 @@ use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Entity\User;
 use App\Service\DomainStateTransitionService;
+use App\Service\MomoFeeService;
 use App\Service\AdminNotificationService;
 use App\Service\AuditLogger;
 use App\Service\NotificationBroadcastService;
@@ -49,6 +50,7 @@ class BookingController extends AbstractController
         private NotificationBroadcastService $notificationBroadcaster,
         private WalletService $walletService,
         private DomainStateTransitionService $stateTransitions,
+        private MomoFeeService $momoFeeService,
         private AuditLogger $auditLogger,
         private RescheduleQuoteService $rescheduleQuoteService,
         private AdminNotificationService $adminNotificationService, // 👈 AJOUTER CETTE LIGNE
@@ -194,12 +196,22 @@ class BookingController extends AbstractController
             }
             $seatsReserved = count($occupiedSeats) + $seatsRequested;
 
+            $allowedMethods = array_column($this->momoFeeService->listOperators(true), 'id');
+            $paymentMethod = $data['paymentMethod'] ?? null;
+
             // --- Prix recalculé côté serveur : aucune valeur financière fournie
             // par le client n'est utilisée. Tous les calculs restent en BCMath. ---
             $pricePerSeat = (string) $trip->getPrice();
             $computedSubtotal = bcmul($pricePerSeat, (string) $seatsRequested, 2);
-            $platformFee = number_format(WalletService::PLATFORM_FEE, 2, '.', '');
-            $computedTotal = bcadd($computedSubtotal, $platformFee, 2);
+            $platformFee = $this->walletService->getPlatformFee();
+            $baseAmount = bcadd($computedSubtotal, $platformFee, 2);
+
+            // Le taux dépend de l'opérateur choisi par le client (voir plus bas,
+            // $paymentMethod est déjà déterminé APRÈS ce bloc dans le code actuel :
+            // il faut donc valider $paymentMethod AVANT de calculer le frais momo,
+            // pas après comme aujourd'hui).
+            $momoFee = $this->momoFeeService->collectionFee($paymentMethod, $baseAmount);
+            $computedTotal = bcadd($baseAmount, $momoFee, 2);
             $netSettlement = $computedSubtotal;
 
             $reservation = new Reservation();
@@ -212,8 +224,7 @@ class BookingController extends AbstractController
             $paymentPhone = $data['paymentPhone'] ?? (method_exists($user, 'getPhoneNumber') ? $user->getPhoneNumber() : '');
             $reservation->setPaymentPhone($paymentPhone ?: '');
 
-            $allowedMethods = ['MTN_MOMO', 'AIRTEL_MONEY'];
-            $paymentMethod = $data['paymentMethod'] ?? null;
+
             if (!in_array($paymentMethod, $allowedMethods, true)) {
                 $connection->rollBack();
                 return new JsonResponse(['error' => 'Méthode de paiement invalide.'], 400);

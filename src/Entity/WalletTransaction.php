@@ -51,6 +51,20 @@ class WalletTransaction
     // Ajustement manuel (litige, correction...)
     public const SOURCE_ADJUSTMENT = 'ADJUSTMENT';
 
+    // Frais momo d'ENCAISSEMENT (commission MTN/Airtel sur le paiement
+    // client) : ligne de traçabilité/rapprochement UNIQUEMENT, ne modifie
+    // aucun solde. Ce montant est un pass-through déjà facturé au client
+    // (inclus dans reservation.totalAmount) censé compenser exactement la
+    // retenue de l'opérateur au règlement — ce n'est ni un revenu ni une
+    // dépense de la plateforme. Voir WalletService::recordMomoCollectionFee().
+    public const SOURCE_MOMO_COLLECTION_FEE = 'MOMO_COLLECTION_FEE';
+    // Frais momo de DÉCAISSEMENT (commission MTN/Airtel sur un remboursement
+    // ou un retrait partenaire) : DÉBITE réellement le portefeuille
+    // plateforme. Coût absorbé par la plateforme, jamais répercuté sur le
+    // bénéficiaire du décaissement. Voir WalletService::recordMomoDisbursementFee()
+    // et PayoutService::recordDisbursementFee().
+    public const SOURCE_MOMO_DISBURSEMENT_FEE = 'MOMO_DISBURSEMENT_FEE';
+
     // Ajustement manuel par admin (crédit ou débit manuel)
     public const SOURCE_ADMIN_CREDIT = 'ADMIN_CREDIT';
     public const SOURCE_ADMIN_DEBIT = 'ADMIN_DEBIT';

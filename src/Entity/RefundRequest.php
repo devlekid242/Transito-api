@@ -265,7 +265,23 @@ class RefundRequest
 
     /**
      * Get the net amount that would be debited from the agency wallet
-     * This is the amount that was originally credited to the agency (gross amount - platform fee)
+     * This is the amount that was originally credited to the agency (gross amount - platform fee - momo fee)
+     *
+     * ⚠️ CALCUL DE SECOURS UNIQUEMENT. Ce montant utilise
+     * WalletService::PLATFORM_FEE, une CONSTANTE FIGÉE à 500 FCFA — pas la
+     * valeur réellement configurée dans SystemSetting::data['platformFee']
+     * (modifiable par un admin via /api/admin/settings). Une entité ne peut
+     * pas proprement injecter SystemSettingRepository pour lire la valeur
+     * live. Si le frais plateforme a été changé depuis la réservation
+     * concernée, ce calcul sera FAUX.
+     *
+     * → Pour tout nouveau code (notamment AdminRefundController::processRefund),
+     * préférez WalletService::computeReservationNetAmount($reservation),
+     * qui lit le vrai frais plateforme configuré ET déduit le frais momo
+     * d'encaissement de la même façon que
+     * WalletService::creditForReservationPayment() — garantissant que le
+     * montant remboursé correspond exactement au montant qui avait été
+     * crédité à l'agence.
      */
     public function getNetAmount(): float
     {
@@ -281,11 +297,15 @@ class RefundRequest
             return max(0.0, (float) $this->requestedAmount);
         }
 
-        // The net amount is the reservation total minus platform fee
-        // Using the centralized constant from WalletService for consistency
+        // The net amount is the reservation total minus platform fee minus
+        // the momo collection fee charged to the client (pass-through, never
+        // due to the agency — see Reservation::getMomoFeeAmount()).
         $grossAmount = (float) $reservation->getTotalAmount();
         $platformFee = WalletService::PLATFORM_FEE;
-        
-        return max(0.0, round($grossAmount - $platformFee, 2));
+        $momoFee = $reservation->getMomoFeeAmount() !== null
+            ? (float) $reservation->getMomoFeeAmount()
+            : 0.0;
+
+        return max(0.0, round($grossAmount - $platformFee - $momoFee, 2));
     }
 }

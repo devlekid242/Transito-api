@@ -13,6 +13,7 @@ use App\Entity\WithdrawalRequest;
 use App\Repository\RefundRequestRepository;
 use App\Repository\TicketRepository;
 use App\Repository\WithdrawalRequestRepository;
+use App\Repository\SystemSettingRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\DBAL\LockMode;
 
@@ -28,14 +29,80 @@ use Doctrine\DBAL\LockMode;
  */
 class WalletService
 {
+    /**
+     * @deprecated Valeur de secours uniquement. La valeur réelle appliquée
+     * vient désormais de SystemSetting::data['platformFee'] (voir
+     * getPlatformFee()), modifiable par un admin via
+     * PUT /api/admin/settings. Avant ce correctif, cette constante était
+     * lue directement dans WalletService/BookingController/AdminRefundController
+     * sans jamais consulter les paramètres système : modifier "platformFee"
+     * dans le back-office n'avait donc AUCUN effet réel. Conservée ici
+     * uniquement en cas d'indisponibilité de SystemSettingRepository.
+     */
     public const PLATFORM_FEE = 500.00;
 
     public function __construct(
         private EntityManagerInterface $em,
         private ?RefundRequestRepository $refundRequestRepository = null,
         private ?TicketRepository $ticketRepository = null,
-        private ?WithdrawalRequestRepository $withdrawalRequestRepository = null
+        private ?WithdrawalRequestRepository $withdrawalRequestRepository = null,
+        private ?SystemSettingRepository $systemSettingRepository = null,
+        private ?MomoFeeService $momoFeeService = null,
     ) {}
+
+    /**
+     * Frais plateforme réellement applicable, lu depuis les paramètres
+     * système. Remplace toute lecture directe de self::PLATFORM_FEE.
+     */
+    public function getPlatformFee(): string
+    {
+        if ($this->systemSettingRepository) {
+            try {
+                $data = $this->systemSettingRepository->findOrCreateSystemSetting()->getData();
+                if (isset($data['platformFee']) && is_numeric($data['platformFee'])) {
+                    return number_format((float) $data['platformFee'], 2, '.', '');
+                }
+            } catch (\Throwable) {
+                // Paramètres illisibles : on retombe sur la valeur historique plutôt que de bloquer un paiement.
+            }
+        }
+
+        return number_format(self::PLATFORM_FEE, 2, '.', '');
+    }
+
+    /**
+     * Frais momo d'ENCAISSEMENT figé sur cette réservation (voir
+     * Reservation::getMomoFeeAmount() pour pourquoi c'est figé et non
+     * recalculé). Retourne '0.00' pour les réservations créées avant
+     * l'ajout de ce champ (jamais null).
+     */
+    public function getMomoFeeAmount(Reservation $reservation): string
+    {
+        return $reservation->getMomoFeeAmount() !== null
+            ? $this->money($reservation->getMomoFeeAmount())
+            : '0.00';
+    }
+
+    /**
+     * SOURCE DE VÉRITÉ UNIQUE pour "quel est le montant net dû à l'agence
+     * pour cette réservation" = total payé par le client - frais plateforme
+     * - frais momo d'encaissement (pass-through, jamais dû à l'agence).
+     *
+     * Utilisé par creditForReservationPayment() au moment du paiement, et
+     * DOIT être utilisé par tout calcul de remboursement (ex.
+     * AdminRefundController::processRefund) au lieu de
+     * RefundRequest::getNetAmount(), qui ne connaît pas le frais plateforme
+     * réellement configuré (voir docblock de cette méthode).
+     */
+    public function computeReservationNetAmount(Reservation $reservation): string
+    {
+        $grossAmount = $this->money($reservation->getTotalAmount());
+        $platformFee = $this->getPlatformFee();
+        $momoFee = $this->getMomoFeeAmount($reservation);
+
+        $netAmount = bcsub(bcsub($grossAmount, $platformFee, 2), $momoFee, 2);
+        return bccomp($netAmount, '0.00', 2) === -1 ? '0.00' : $netAmount;
+    }
 
     /**
      * Capture l'état complet du wallet dans le ledger. balanceAfter reste
@@ -183,13 +250,9 @@ class WalletService
         $wallet = $this->getOrCreateWallet($agency);
         $wallet = $this->em->getRepository(Wallet::class)->find($wallet->getId(), LockMode::PESSIMISTIC_WRITE) ?? $wallet;
 
-        $grossAmount = $this->money($reservation->getTotalAmount());
-        $platformFee = number_format(self::PLATFORM_FEE, 2, '.', '');
-        
-        $netAmount = bcsub($grossAmount, $platformFee, 2);
-        if (bccomp($netAmount, '0.00', 2) === -1) {
-            $netAmount = '0.00';
-        }
+        $platformFee = $this->getPlatformFee();
+        $momoFee = $this->getMomoFeeAmount($reservation);
+        $netAmount = $this->computeReservationNetAmount($reservation);
 
         // Verrouille la répartition nette au niveau de chaque billet afin que
         // boarding/no-show utilisent exactement les mêmes montants.
@@ -231,7 +294,96 @@ class WalletService
         $this->em->persist($wallet);
         $this->em->persist($platformWallet);
 
+        // 3) Traçabilité du frais momo d'encaissement (pass-through, aucune
+        // mutation de solde : il compense la retenue de l'opérateur au
+        // règlement, ce n'est ni un revenu ni une dépense tant que le
+        // rapprochement bancaire n'a pas confirmé le taux réellement appliqué).
+        if (bccomp($momoFee, '0.00', 2) > 0 && $reservation->getPaymentMethod()) {
+            $this->recordMomoCollectionFee($reservation, (string) $reservation->getPaymentMethod(), $momoFee);
+        }
+
         return ['credit' => $creditTx, 'fee' => $platformFeeTx];
+    }
+
+    /**
+     * Enregistre (pour traçabilité/rapprochement) le frais d'encaissement
+     * momo facturé au client et déjà inclus dans reservation.totalAmount.
+     * N'affecte PAS le solde plateforme (voir docblock de creditForReservationPayment).
+     *
+     * /!\ Nécessite WalletTransaction::SOURCE_MOMO_COLLECTION_FEE (voir notes de migration).
+     */
+    public function recordMomoCollectionFee(Reservation $reservation, string $operatorId, string $feeAmount): ?WalletTransaction
+    {
+        $feeAmount = $this->money($feeAmount);
+        if (bccomp($feeAmount, '0.00', 2) <= 0) {
+            return null;
+        }
+
+        $existing = $this->em->getRepository(WalletTransaction::class)->findOneBy([
+            'reservation' => $reservation,
+            'source' => WalletTransaction::SOURCE_MOMO_COLLECTION_FEE,
+        ]);
+        if ($existing) {
+            return $existing;
+        }
+
+        $platformWallet = $this->getOrCreatePlatformWallet();
+
+        $tx = new WalletTransaction();
+        $tx->setWallet($platformWallet);
+        $tx->setType(WalletTransaction::TYPE_CREDIT);
+        $tx->setSource(WalletTransaction::SOURCE_MOMO_COLLECTION_FEE);
+        $tx->setAmount($feeAmount);
+        $this->snapshotTransaction($tx, $platformWallet); // pas de mutation de solde : ligne mémo de rapprochement
+        $tx->setReservation($reservation);
+        $tx->setDescription(sprintf(
+            'Frais momo (%s) facturé au client, réservation #%d — pass-through, hors marge plateforme',
+            $operatorId,
+            $reservation->getId()
+        ));
+        $this->em->persist($tx);
+
+        return $tx;
+    }
+
+    /**
+     * Enregistre le coût réel d'un décaissement momo (remboursement client
+     * ou retrait partenaire). Débite RÉELLEMENT le portefeuille plateforme :
+     * ce coût n'est jamais répercuté sur le bénéficiaire, qui reçoit
+     * toujours le montant net plein (règle validée avec le porteur du projet).
+     *
+     * À appeler depuis PayoutService une fois le décaissement confirmé par
+     * l'opérateur (jamais avant, pour ne pas facturer un coût sur un
+     * transfert qui a finalement échoué).
+     *
+     * /!\ Nécessite WalletTransaction::SOURCE_MOMO_DISBURSEMENT_FEE (voir notes de migration).
+     */
+    public function recordMomoDisbursementFee(string $operatorId, string $feeAmount, string $description): ?WalletTransaction
+    {
+        $feeAmount = $this->money($feeAmount);
+        if (bccomp($feeAmount, '0.00', 2) <= 0) {
+            return null;
+        }
+
+        $platformWallet = $this->getOrCreatePlatformWallet();
+        $platformWallet = $this->em->getRepository(Wallet::class)->find($platformWallet->getId(), LockMode::PESSIMISTIC_WRITE) ?? $platformWallet;
+
+        $newAvailable = bcsub($platformWallet->getAvailableBalance(), $feeAmount, 2);
+        $platformWallet->setAvailableBalance($newAvailable);
+        $platformWallet->touch();
+
+        $tx = new WalletTransaction();
+        $tx->setWallet($platformWallet);
+        $tx->setType(WalletTransaction::TYPE_DEBIT);
+        $tx->setSource(WalletTransaction::SOURCE_MOMO_DISBURSEMENT_FEE);
+        $tx->setAmount($feeAmount);
+        $this->snapshotTransaction($tx, $platformWallet);
+        $tx->setDescription(sprintf('%s — frais opérateur %s (%s FCFA), absorbé par la plateforme', $description, $operatorId, $feeAmount));
+
+        $this->em->persist($tx);
+        $this->em->persist($platformWallet);
+
+        return $tx;
     }
 
     /**
@@ -267,12 +419,12 @@ class WalletService
 
         // Le montant du billet est déterminé une seule fois lors de la
         // confirmation du paiement. Cela évite les reliquats de 0.01 FCFA.
-        $grossAmount = $this->money($reservation->getTotalAmount());
-        $platformFee = number_format(self::PLATFORM_FEE, 2, '.', '');
-        $netReservationAmount = bcsub($grossAmount, $platformFee, 2);
-        if (bccomp($netReservationAmount, '0.00', 2) === -1) {
-            $netReservationAmount = '0.00';
-        }
+        // /!\ Avant ce correctif, ce calcul dupliquait celui de
+        // creditForReservationPayment() avec le frais plateforme FIGÉ
+        // (self::PLATFORM_FEE, pas la valeur configurée) et SANS déduire le
+        // frais momo — un embarquement pouvait donc débloquer un montant
+        // différent de celui réellement crédité à l'agence au paiement.
+        $netReservationAmount = $this->computeReservationNetAmount($reservation);
         $this->ensureTicketSettlementAmounts($reservation, $netReservationAmount);
         $ticketNetAmount = $ticket->getSettlementAmount() ?? '0.00';
 
@@ -428,7 +580,7 @@ class WalletService
         $wallet = $this->em->getRepository(Wallet::class)->find($wallet->getId(), LockMode::PESSIMISTIC_WRITE) ?? $wallet;
 
         $tickets = $this->em->getRepository(Ticket::class)->findBy(['reservation' => $reservation], ['id' => 'ASC']);
-        $oldNet = $this->money(bcsub((string) $reservation->getTotalAmount(), number_format(self::PLATFORM_FEE, 2, '.', ''), 2));
+        $oldNet = $this->computeReservationNetAmount($reservation);
         $newNet = $this->money(bcadd($oldNet, $difference, 2));
         $this->ensureTicketSettlementAmounts($reservation, $newNet);
 

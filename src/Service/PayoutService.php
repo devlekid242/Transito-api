@@ -31,6 +31,8 @@ class PayoutService
         private readonly EntityManagerInterface $em,
         private readonly MobileMoneyGatewayFactory $gatewayFactory,
         private readonly LoggerInterface $logger,
+        private readonly WalletService $walletService,
+        private readonly MomoFeeService $momoFeeService,
     ) {}
 
     /**
@@ -146,6 +148,37 @@ class PayoutService
                 'purpose' => $payout->getPurpose(),
                 'reason' => $result->reason,
             ]);
+            // Transfert refusé : aucun frais opérateur n'est prélevé sur un
+            // décaissement qui n'a pas eu lieu.
+            return;
         }
+
+        $this->recordDisbursementFee($payout);
+    }
+
+    /**
+     * Enregistre le coût réel (en % du montant transféré) que l'opérateur
+     * facture à la plateforme pour ce décaissement. Débite le portefeuille
+     * plateforme — jamais le montant reçu par le bénéficiaire (règle
+     * métier : le client remboursé / l'agence qui retire touche toujours
+     * le montant net plein).
+     *
+     * Appelé uniquement une fois le transfert confirmé par l'opérateur
+     * (result final, non FAILED), pour ne jamais facturer un coût sur un
+     * décaissement qui a finalement échoué.
+     */
+    private function recordDisbursementFee(PayoutTransaction $payout): void
+    {
+        $fee = $this->momoFeeService->disbursementFee($payout->getOperator(), $payout->getAmount());
+        if (bccomp($fee, '0.00', 2) <= 0) {
+            return;
+        }
+
+        $label = $payout->getPurpose() === PayoutTransaction::PURPOSE_REFUND
+            ? sprintf('Décaissement remboursement (payout #%d)', $payout->getId())
+            : sprintf('Décaissement retrait partenaire (payout #%d)', $payout->getId());
+
+        $this->walletService->recordMomoDisbursementFee($payout->getOperator(), $fee, $label);
+        $this->em->flush();
     }
 }

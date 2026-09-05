@@ -46,7 +46,11 @@ class PayoutTransaction
     private ?WithdrawalRequest $withdrawalRequest = null;
 
     #[ORM\Column(length: 50)]
-    private string $operator; // MTN_MOMO | AIRTEL_MONEY
+    private string $operator; // ex: MTN_MOMO, AIRTEL_MOMO — doit correspondre exactement
+    // à un id de SystemSetting::data['momoOperators'] (voir MomoFeeService).
+    // /!\ Ne PAS utiliser 'AIRTEL_MONEY' : cet identifiant ne correspond à
+    // aucun opérateur réel ailleurs dans le code (bug historique corrigé
+    // dans Reservation/BookingController/front — voir CHANGEMENTS_A_APPLIQUER.md).
 
     #[ORM\Column(length: 30)]
     private string $recipientMsisdn;

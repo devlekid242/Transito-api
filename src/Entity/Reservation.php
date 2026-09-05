@@ -71,13 +71,43 @@ class Reservation
     #[Groups(['reservation:read', 'reservation:write'])]
     private ?string $totalAmount = null;
 
+    /**
+     * Frais momo d'ENCAISSEMENT (commission opérateur MTN/Airtel) inclus
+     * dans totalAmount et facturé au client, figé au moment de la
+     * réservation avec le taux alors en vigueur (SystemSetting::data
+     * ['momoOperators'][*]['collectionFeeRate']).
+     *
+     * Figé ici (plutôt que recalculé à chaque lecture) pour que le montant
+     * net crédité à l'agence (WalletService::creditForReservationPayment)
+     * et le montant remboursé en cas d'annulation restent basés sur le taux
+     * qui était réellement en vigueur au moment du paiement, même si
+     * l'admin modifie le taux de l'opérateur entre-temps.
+     *
+     * Nullable : les réservations créées avant ce correctif n'ont pas cette
+     * valeur ; le code appelant doit traiter null comme 0.00 (voir
+     * WalletService::creditForReservationPayment).
+     */
+    #[ORM\Column(name: 'momo_fee_amount', type: Types::DECIMAL, precision: 10, scale: 2, nullable: true)]
+    #[Groups(['reservation:read'])]
+    private ?string $momoFeeAmount = null;
+
     #[ORM\Column(name: 'payment_phone', length: 20)]
     #[Assert\NotBlank(message: "Le numéro mobile utilisé pour le prélèvement est obligatoire.")]
     #[Groups(['reservation:read', 'reservation:write'])]
     private ?string $paymentPhone = null;
 
     #[ORM\Column(name: 'payment_method', length: 50)]
-    #[Assert\Choice(choices: ['MTN_MOMO', 'AIRTEL_MONEY'], message: "Le mode de paiement mobile est inconnu.")]
+    // La liste des opérateurs acceptés n'est plus figée ici : elle est
+    // pilotée dynamiquement par SystemSetting::data['momoOperators'] (un
+    // admin peut en ajouter/désactiver un sans déploiement). La valider
+    // contre une énumération figée ('MTN_MOMO', 'AIRTEL_MONEY' -- notez
+    // aussi que cet identifiant ne correspondait à AUCUN opérateur réel :
+    // partout ailleurs dans le code c'est 'AIRTEL_MOMO') aurait justement
+    // recréé l'incohérence qu'on corrige. La validation "l'opérateur existe
+    // et est actif" se fait désormais dans BookingController via
+    // MomoFeeService::listOperators(true), qui a accès à la config live.
+    // Ici on ne garde qu'une validation de FORMAT (garde-fou anti-injection).
+    #[Assert\Regex(pattern: '/^[A-Z0-9_]{3,50}$/', message: "Le mode de paiement mobile est invalide.")]
     #[Groups(['reservation:read', 'reservation:write'])]
     private ?string $paymentMethod = null;
 
@@ -163,6 +193,17 @@ class Reservation
     public function setTotalAmount(string $totalAmount): static
     {
         $this->totalAmount = $totalAmount;
+        return $this;
+    }
+
+    public function getMomoFeeAmount(): ?string
+    {
+        return $this->momoFeeAmount;
+    }
+
+    public function setMomoFeeAmount(?string $momoFeeAmount): static
+    {
+        $this->momoFeeAmount = $momoFeeAmount;
         return $this;
     }
 
