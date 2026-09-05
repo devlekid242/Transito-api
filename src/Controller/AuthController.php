@@ -73,7 +73,7 @@ class AuthController extends AbstractController
         $agent = $agentRepository->findOneBy(['user' => $user]);
         $admin = $adminRepository->findByUser($user);
 
-        if ($agent && $agent->getStatus() !== 'actif') {
+        if ($agent && $agent->getStatus() !== 'active') {
             return $this->json(['message' => 'Compte agent inactif. Contactez l’administrateur de votre agence.'], Response::HTTP_FORBIDDEN);
         }
         if ($agent && $agent->getAgency()?->getStatus() !== 'active') {
