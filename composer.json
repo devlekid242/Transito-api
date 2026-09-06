@@ -29,7 +29,8 @@
         "symfony/security-bundle": "7.4.*",
         "symfony/twig-bundle": "7.4.*",
         "symfony/yaml": "7.4.*",
-        "twilio/sdk": "^8.11.6"
+        "twilio/sdk": "^8.11.6",
+        "zavudev/sdk": "*"
     },
     "require-dev": {
         "api-platform/core": ">=4.3.15",
