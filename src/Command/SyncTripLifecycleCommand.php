@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Command;
 
+use App\Entity\JobRun;
 use App\Entity\Notification;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
 use App\Entity\Trip;
 use App\Service\DomainStateTransitionService;
+use App\Service\JobReportRecorder;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
 use Doctrine\DBAL\LockMode;
@@ -30,6 +32,7 @@ final class SyncTripLifecycleCommand extends Command
         private WalletService $walletService,
         private NotificationBroadcastService $broadcaster,
         private DomainStateTransitionService $stateTransitions,
+        private JobReportRecorder $recorder,
         #[Autowire('%env(int:TRIP_BOARDING_WINDOW_MINUTES)%')]
         private int $boardingWindowMinutes = 60,
         #[Autowire('%env(int:TRIP_NO_SHOW_GRACE_MINUTES)%')]
@@ -53,6 +56,7 @@ final class SyncTripLifecycleCommand extends Command
 
         $changed = 0;
         $noShows = 0;
+        $issues = [];
 
         foreach ($trips as $candidate) {
             $connection = $this->em->getConnection();
@@ -166,6 +170,11 @@ final class SyncTripLifecycleCommand extends Command
                 if ($connection->isTransactionActive()) {
                     $connection->rollBack();
                 }
+                $issues[] = [
+                    'code' => 'TRIP_SYNC_FAILED',
+                    'tripId' => $candidate->getId(),
+                    'message' => $e->getMessage(),
+                ];
                 $output->writeln(sprintf('<error>Voyage #%d : %s</error>', $candidate->getId(), $e->getMessage()));
             }
         }
@@ -175,6 +184,17 @@ final class SyncTripLifecycleCommand extends Command
             $changed,
             $noShows
         ));
+
+        $this->recorder->finish(
+            empty($issues) ? JobRun::STATUS_OK : JobRun::STATUS_WARNING,
+            summary: [
+                'candidateTrips' => count($trips),
+                'statusChanges' => $changed,
+                'noShows' => $noShows,
+                'errorCount' => count($issues),
+            ],
+            issues: $issues,
+        );
 
         return Command::SUCCESS;
     }

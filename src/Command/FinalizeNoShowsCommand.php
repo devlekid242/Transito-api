@@ -2,11 +2,13 @@
 
 namespace App\Command;
 
+use App\Entity\JobRun;
 use App\Entity\Notification;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
 use App\Service\AuditLogger;
 use App\Service\DomainStateTransitionService;
+use App\Service\JobReportRecorder;
 use App\Service\NotificationBroadcastService;
 use App\Service\WalletService;
 use Doctrine\DBAL\LockMode;
@@ -30,6 +32,7 @@ final class FinalizeNoShowsCommand extends Command
         private NotificationBroadcastService $broadcaster,
         private DomainStateTransitionService $stateTransitions,
         private AuditLogger $auditLogger,
+        private JobReportRecorder $recorder,
         #[Autowire('%env(int:TRIP_NO_SHOW_GRACE_MINUTES)%')]
         private int $noShowGraceMinutes = 30,
     ) {
@@ -64,6 +67,7 @@ final class FinalizeNoShowsCommand extends Command
             ->getResult();
 
         $count = 0;
+        $issues = [];
         foreach ($tickets as $ticket) {
             $notification = null;
             $connection = $this->em->getConnection();
@@ -146,11 +150,27 @@ final class FinalizeNoShowsCommand extends Command
                 if ($connection->isTransactionActive()) {
                     $connection->rollBack();
                 }
+                $issues[] = [
+                    'code' => 'NO_SHOW_FINALIZATION_FAILED',
+                    'ticketId' => $ticket->getId(),
+                    'message' => $e->getMessage(),
+                ];
                 $output->writeln(sprintf('<error>Billet #%d : %s</error>', $ticket->getId(), $e->getMessage()));
             }
         }
 
         $output->writeln(sprintf('<info>%d billet(s) finalisé(s) en no-show.</info>', $count));
+
+        $this->recorder->finish(
+            empty($issues) ? JobRun::STATUS_OK : JobRun::STATUS_WARNING,
+            summary: [
+                'candidateCount' => count($tickets),
+                'finalizedCount' => $count,
+                'errorCount' => count($issues),
+            ],
+            issues: $issues,
+        );
+
         return Command::SUCCESS;
     }
 }

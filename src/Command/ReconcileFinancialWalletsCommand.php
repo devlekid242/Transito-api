@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Command;
 
+use App\Entity\JobRun;
 use App\Service\FinancialReconciliationService;
+use App\Service\JobReportRecorder;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -16,8 +18,10 @@ use Symfony\Component\Console\Output\OutputInterface;
 )]
 final class ReconcileFinancialWalletsCommand extends Command
 {
-    public function __construct(private readonly FinancialReconciliationService $reconciliation)
-    {
+    public function __construct(
+        private readonly FinancialReconciliationService $reconciliation,
+        private readonly JobReportRecorder $recorder,
+    ) {
         parent::__construct();
     }
 
@@ -41,6 +45,17 @@ final class ReconcileFinancialWalletsCommand extends Command
             ));
         }
 
-        return $result['status'] === 'OK' ? Command::SUCCESS : Command::FAILURE;
+        $isOk = $result['status'] === 'OK';
+
+        $this->recorder->finish(
+            $isOk ? JobRun::STATUS_OK : JobRun::STATUS_WARNING,
+            summary: [
+                'checkedWallets' => $result['checkedWallets'],
+                'inconsistentWallets' => $result['inconsistentWallets'],
+            ],
+            issues: $result['discrepancies'],
+        );
+
+        return $isOk ? Command::SUCCESS : Command::FAILURE;
     }
 }

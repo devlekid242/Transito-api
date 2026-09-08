@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Command;
 
+use App\Entity\JobRun;
 use App\Entity\Notification;
 use App\Entity\Reservation;
 use App\Entity\Ticket;
+use App\Service\JobReportRecorder;
 use App\Service\NotificationBroadcastService;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
@@ -24,6 +26,7 @@ final class ExpirePendingReservationsCommand extends Command
     public function __construct(
         private EntityManagerInterface $em,
         private NotificationBroadcastService $broadcaster,
+        private JobReportRecorder $recorder,
     ) {
         parent::__construct();
     }
@@ -41,6 +44,7 @@ final class ExpirePendingReservationsCommand extends Command
             ->getQuery()->getResult();
 
         $count = 0;
+        $issues = [];
         foreach ($reservations as $candidate) {
             $connection = $this->em->getConnection();
             $connection->beginTransaction();
@@ -141,6 +145,11 @@ final class ExpirePendingReservationsCommand extends Command
                 if ($connection->isTransactionActive()) {
                     $connection->rollBack();
                 }
+                $issues[] = [
+                    'code' => 'EXPIRE_RESERVATION_FAILED',
+                    'reservationId' => $candidate->getId(),
+                    'message' => $e->getMessage(),
+                ];
                 $output->writeln(sprintf(
                     '<error>Réservation #%d : %s</error>',
                     $candidate->getId(),
@@ -150,6 +159,17 @@ final class ExpirePendingReservationsCommand extends Command
         }
 
         $output->writeln(sprintf('<info>%d réservation(s) expirée(s).</info>', $count));
+
+        $this->recorder->finish(
+            empty($issues) ? JobRun::STATUS_OK : JobRun::STATUS_WARNING,
+            summary: [
+                'candidateCount' => count($reservations),
+                'expiredCount' => $count,
+                'errorCount' => count($issues),
+            ],
+            issues: $issues,
+        );
+
         return Command::SUCCESS;
     }
 }

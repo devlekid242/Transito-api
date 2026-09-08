@@ -2,7 +2,9 @@
 
 namespace App\Command;
 
+use App\Entity\JobRun;
 use App\Entity\PaymentLog;
+use App\Service\JobReportRecorder;
 use App\Service\MobileMoney\MobileMoneyException;
 use App\Service\MobileMoney\MobileMoneyGatewayFactory;
 use App\Service\MobileMoney\MobileMoneyStatus;
@@ -34,6 +36,12 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  * les vrais callbacks actifs (callback perdu, réseau instable...) : on peut
  * la garder en cron toutes les minutes sur les PaymentLog PENDING de plus
  * de 30s.
+ *
+ * Rapport (job_run) : agrégé sur toute la durée du process. En cron (une
+ * seule passe), c'est le rapport complet de l'exécution. En --watch (dev,
+ * boucle potentiellement infinie tant que Ctrl+C n'est pas envoyé), le
+ * rapport n'est écrit qu'à la sortie propre de la boucle — cohérent avec
+ * l'usage "outil de dev" documenté ci-dessus, sans changer ce comportement.
  */
 #[AsCommand(name: 'transito:momo:poll-payments', description: 'Interroge MTN/Airtel pour les paiements en attente et finalise leur statut')]
 class PollMobileMoneyPaymentsCommand extends Command
@@ -43,6 +51,7 @@ class PollMobileMoneyPaymentsCommand extends Command
         private readonly MobileMoneyGatewayFactory $gatewayFactory,
         private readonly HttpKernelInterface $httpKernel,
         private readonly string $webhookSecret,
+        private readonly JobReportRecorder $recorder,
     ) {
         parent::__construct();
     }
@@ -60,17 +69,34 @@ class PollMobileMoneyPaymentsCommand extends Command
         $watch = (bool) $input->getOption('watch');
         $interval = max(1, (int) $input->getOption('interval'));
 
+        $totals = ['checked' => 0, 'forwarded' => 0, 'stillPending' => 0];
+        $issues = [];
+
         do {
-            $this->pollOnce($output, (int) $input->getOption('max-age'));
+            $pass = $this->pollOnce($output, (int) $input->getOption('max-age'));
+            $totals['checked'] += $pass['checked'];
+            $totals['forwarded'] += $pass['forwarded'];
+            $totals['stillPending'] += $pass['stillPending'];
+            $issues = array_merge($issues, $pass['issues']);
+
             if ($watch) {
                 sleep($interval);
             }
         } while ($watch);
 
+        $this->recorder->finish(
+            empty($issues) ? JobRun::STATUS_OK : JobRun::STATUS_WARNING,
+            summary: $totals + ['gatewayErrors' => count($issues)],
+            issues: $issues,
+        );
+
         return Command::SUCCESS;
     }
 
-    private function pollOnce(OutputInterface $output, int $maxAgeMinutes): void
+    /**
+     * @return array{checked: int, forwarded: int, stillPending: int, issues: array<int, array<string, mixed>>}
+     */
+    private function pollOnce(OutputInterface $output, int $maxAgeMinutes): array
     {
         $threshold = new \DateTime(sprintf('-%d minutes', $maxAgeMinutes));
 
@@ -82,29 +108,40 @@ class PollMobileMoneyPaymentsCommand extends Command
             ->getQuery()
             ->getResult();
 
+        $result = ['checked' => count($pending), 'forwarded' => 0, 'stillPending' => 0, 'issues' => []];
+
         if (!$pending) {
             // var_dump($threshold);
             $output->writeln('<comment>Aucun paiement PENDING à vérifier.</comment>');
-            return;
+            return $result;
         }
 
         foreach ($pending as $log) {
             /** @var PaymentLog $log */
             try {
                 $gateway = $this->gatewayFactory->get($log->getOperator());
-                $result = $gateway->getCollectionStatus($log->getReference());
+                $status = $gateway->getCollectionStatus($log->getReference());
             } catch (MobileMoneyException $e) {
+                $result['issues'][] = [
+                    'code' => 'MOMO_STATUS_CHECK_FAILED',
+                    'reference' => $log->getReference(),
+                    'message' => $e->getMessage(),
+                ];
                 $output->writeln(sprintf('<error>[%s] échec de vérification: %s</error>', $log->getReference(), $e->getMessage()));
                 continue;
             }
 
-            if (!$result->isFinal()) {
+            if (!$status->isFinal()) {
+                $result['stillPending']++;
                 $output->writeln(sprintf('[%s] toujours PENDING côté opérateur.', $log->getReference()));
                 continue;
             }
 
-            $this->forwardToWebhook($log, $result, $output);
+            $this->forwardToWebhook($log, $status, $output);
+            $result['forwarded']++;
         }
+
+        return $result;
     }
 
     private function forwardToWebhook(PaymentLog $log, MobileMoneyStatus $result, OutputInterface $output): void
