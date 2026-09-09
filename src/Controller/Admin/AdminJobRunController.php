@@ -1,8 +1,7 @@
 <?php
+namespace App\Controller\Admin;
 
-declare(strict_types=1);
-
-namespace App\Controller;
+use App\Security\AdminRoleVoter;
 
 use App\Repository\JobRunRepository;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -17,14 +16,14 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * admins Finance, cf. les permissions déjà utilisées dans layout.component.ts).
  */
 #[Route('/api/admin/job-runs')]
-#[IsGranted('ROLE_ADMIN')]
+#[IsGranted(AdminRoleVoter::SUPER)]
 final class AdminJobRunController extends AbstractController
 {
     public function __construct(private readonly JobRunRepository $jobRuns)
     {
     }
 
-    #[Route('', methods: ['GET'])]
+    #[Route('', name: 'admin_job_runs_list', methods: ['GET'])]
     public function list(Request $request): JsonResponse
     {
         $limit = max(1, min(200, (int) $request->query->get('limit', 50)));
@@ -50,7 +49,7 @@ final class AdminJobRunController extends AbstractController
     }
 
     /** Dernière exécution connue pour chaque commande — pour des cartes "statut actuel". */
-    #[Route('/latest', methods: ['GET'])]
+    #[Route('/latest', name: 'admin_job_runs_latest', methods: ['GET'])]
     public function latest(): JsonResponse
     {
         $runs = $this->jobRuns->findLatestPerCommand();
@@ -58,7 +57,7 @@ final class AdminJobRunController extends AbstractController
         return new JsonResponse(array_map(static fn($r) => $r->toArray(), $runs));
     }
 
-    #[Route('/{id}', methods: ['GET'], requirements: ['id' => '\d+'])]
+    #[Route('/{id}', name: 'admin_job_runs_show', methods: ['GET'], requirements: ['id' => '\d+'])]
     public function show(int $id): JsonResponse
     {
         $run = $this->jobRuns->find($id);

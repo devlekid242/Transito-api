@@ -1,9 +1,8 @@
 <?php
 
-declare(strict_types=1);
-
 namespace App\Entity;
 
+use ApiPlatform\Metadata\ApiResource;
 use App\Repository\JobRunRepository;
 use Doctrine\ORM\Mapping as ORM;
 
@@ -11,6 +10,12 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\Table(name: 'job_run')]
 #[ORM\Index(columns: ['command_name', 'started_at'], name: 'idx_job_run_command_started')]
 #[ORM\Index(columns: ['status'], name: 'idx_job_run_status')]
+#[ApiResource(
+    operations: [
+        new \ApiPlatform\Metadata\GetCollection(),
+        new \ApiPlatform\Metadata\Get(),
+    ]
+)]
 class JobRun
 {
     public const STATUS_RUNNING = 'RUNNING';

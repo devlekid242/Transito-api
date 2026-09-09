@@ -17,6 +17,7 @@ use App\Service\NotificationBroadcastService;
 use App\Service\StatusMapperService;
 use App\Service\TripCancellationService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\DBAL\Types\Types;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -68,11 +69,13 @@ class TripController extends AbstractController
         }
 
         if ($user instanceof User) {
-            if (!in_array('ROLE_PARTNER', $user->getRoles())) {
-                $qb->andWhere('t.departureTime >= :now')
-                    ->setParameter('now', new \DateTime());
-                $qb->andWhere('t.departureTimeOfDay >= :now')
-                    ->setParameter('now', new \DateTime());
+            if(!isset($departureDate) || $departureDate === null) {
+                if (!in_array('ROLE_PARTNER', $user->getRoles())) {
+                    $qb->andWhere('t.departureTime >= :now')
+                        ->setParameter('now', new \DateTime());
+                    $qb->andWhere('t.departureTimeOfDay >= :now')
+                        ->setParameter('now', new \DateTime());
+                }
             }
         }
 
@@ -125,11 +128,13 @@ class TripController extends AbstractController
             try {
                 $dateFrom = new \DateTime($departureDate);
                 $dateTo = (clone $dateFrom)->modify('+1 day');
+                // return $this->json([$dateFrom, $dateTo], Response::HTTP_BAD_REQUEST);
                 $qb->andWhere('t.departureTime >= :dateFrom')
                     ->andWhere('t.departureTime < :dateTo')
-                    ->setParameter('dateFrom', $dateFrom)
-                    ->setParameter('dateTo', $dateTo);
+                    ->setParameter('dateFrom', $dateFrom, Types::DATE_MUTABLE)
+                    ->setParameter('dateTo', $dateTo, Types::DATE_MUTABLE);
             } catch (\Exception $exception) {
+                return $this->json(['message' => 'Date de départ invalide.'], Response::HTTP_BAD_REQUEST);
             }
         }
 
