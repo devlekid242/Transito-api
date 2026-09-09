@@ -103,6 +103,9 @@ class FcmPushService
                 'sound' => 'default',
                 'default_sound' => true,
                 'notification_priority' => 'PRIORITY_HIGH',
+                'default_vibrate_timings' => true,
+                'default_light_settings' => true,
+                'notification_priority' => 'PRIORITY_MAX',
                 'visibility' => 'PUBLIC',
             ],
         ]);
@@ -110,6 +113,7 @@ class FcmPushService
         $apnsConfig = ApnsConfig::fromArray([
             'headers' => [
                 'apns-priority' => '10',
+                'apns-push-type' => 'alert',
             ],
             'payload' => [
                 'aps' => [
@@ -120,6 +124,7 @@ class FcmPushService
                     'sound' => 'default',
                     'badge' => 1,
                     'content-available' => 1,
+                    'interruption-level' => 'time-sensitive',
                 ],
             ],
         ]);
