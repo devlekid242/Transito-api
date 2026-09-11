@@ -286,7 +286,7 @@ class AdminUserController extends AbstractController
             'fullName' => $user->getFullName(),
             'email' => $user->getEmail(),
             'phoneNumber' => $user->getPhoneNumber(),
-            'imageUrl' => $user->getImageUrl(),
+            'imageUrl' => $user->getProfilePhotoUrl(),
             'role' => $role,
             'status' => $user->getStatus(),
             'avatarColor' => $this->getAvatarColor($user->getId()),

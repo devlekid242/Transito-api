@@ -6,6 +6,30 @@ use App\Entity\Notification;
 
 class NotificationNormalizer
 {
+    /**
+     * 👈 NOUVEAU : fallback UNIQUEMENT pour les notifications créées avant
+     * l'introduction du champ `section`, ou créées sans le préciser.
+     * Dès que l'appelant (contrôleur métier, formulaire admin, etc.) fournit
+     * `section` explicitement, on l'utilise telle quelle — ce mapping n'est
+     * jamais consulté dans ce cas.
+     */
+    private const CATEGORY_TO_SECTION_FALLBACK = [
+        'PAYMENT' => 'gestion-finance',
+        'BOOKING' => 'reservations',
+        'TRIP' => 'trip-schedule',
+        // INFO / PROMOTION : pas de section évidente → badge générique
+        // "Notifications" uniquement (voir resolveSection()).
+    ];
+
+    private function resolveSection(Notification $notification, string $category): ?string
+    {
+        if ($notification->getSection() !== null) {
+            return $notification->getSection();
+        }
+
+        return self::CATEGORY_TO_SECTION_FALLBACK[$category] ?? null;
+    }
+
     public function normalize(Notification $notification): array
     {
         $category = strtoupper($notification->getCategory() ?? 'INFO');
@@ -34,6 +58,7 @@ class NotificationNormalizer
             'message' => $notification->getContent(),
             'type' => $category,
             'category' => $category,
+            'section' => $this->resolveSection($notification, $category),
             'payload' => $notification->getPayload(),
             'isRead' => $notification->getIsRead() === 1,
             'createdAt' => $notification->getCreatedAt()?->format(\DateTimeInterface::ATOM),

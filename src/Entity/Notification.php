@@ -50,6 +50,18 @@ class Notification
     #[Groups(['notification:read', 'notification:write'])]
     private ?int $recipientId = null;
 
+    /**
+     * 👈 NOUVEAU : correspond directement au `link` des NavItem du sidebar
+     * (ex: 'reservations', 'gestion-finance', 'trip-schedule',
+     * 'support-client'...). Permet au front d'afficher un badge sur LA
+     * bonne section sans avoir à deviner via `category`/le texte.
+     * null = notification générique (pas de section précise), elle
+     * n'alimente que le badge global "Notifications".
+     */
+    #[ORM\Column(length: 100, nullable: true)]
+    #[Groups(['notification:read', 'notification:write'])]
+    private ?string $section = null;
+
     #[ORM\Column(length: 150)]
     #[Assert\NotBlank(message: "Le titre de la notification est obligatoire.")]
     #[Groups(['notification:read', 'notification:write'])]
@@ -106,6 +118,17 @@ class Notification
     public function setRecipientId(?int $recipientId): static
     {
         $this->recipientId = $recipientId;
+        return $this;
+    }
+
+    public function getSection(): ?string
+    {
+        return $this->section;
+    }
+
+    public function setSection(?string $section): static
+    {
+        $this->section = $section;
         return $this;
     }
 

@@ -182,6 +182,13 @@ class NotificationController extends AbstractController
         $notification->setContent($content);
         $notification->setCategory(strtoupper($data['category'] ?? 'INFO'));
         $notification->setPayload($data['payload'] ?? null);
+        // 👈 NOUVEAU : section explicite ciblant une entrée du sidebar
+        // (ex: 'reservations', 'gestion-finance'...). Optionnelle : si
+        // absente, NotificationNormalizer retombe sur une déduction depuis
+        // `category`. À privilégier dès qu'un contrôleur métier connu émet
+        // la notification (il sait exactement de quelle section il parle).
+        $section = isset($data['section']) ? trim((string)$data['section']) : null;
+        $notification->setSection($section !== '' ? $section : null);
 
         $em->persist($notification);
         $em->flush();
@@ -203,6 +210,13 @@ class NotificationController extends AbstractController
         return $this->json($data);
     }
 
+    /**
+     * 👈 ENRICHI : renvoie en plus `bySection`, la répartition du nombre de
+     * notifications non lues par section de sidebar (ex: {"reservations":
+     * 3, "gestion-finance": 1}). Un seul aller-retour réseau pour tout
+     * alimenter (badge global + badges par section) plutôt que d'ajouter un
+     * endpoint séparé appelé en parallèle.
+     */
     #[Route('/unread/count', name: 'api_notifications_unread_count', methods: ['GET'])]
     public function unreadCount(NotificationRepository $notificationRepository): JsonResponse
     {
@@ -211,7 +225,19 @@ class NotificationController extends AbstractController
 
         $notifications = $this->buildUserAndAgencyQuery($notificationRepository, $user, true);
 
-        return $this->json(['count' => count($notifications)]);
+        $bySection = [];
+        foreach ($notifications as $notification) {
+            $section = $this->normalizer->normalize($notification)['section'] ?? null;
+            if ($section === null) {
+                continue;
+            }
+            $bySection[$section] = ($bySection[$section] ?? 0) + 1;
+        }
+
+        return $this->json([
+            'count' => count($notifications),
+            'bySection' => $bySection,
+        ]);
     }
 
     #[Route('/{id}/read', name: 'api_notifications_mark_read', methods: ['PATCH'])]
